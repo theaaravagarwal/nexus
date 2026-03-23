@@ -35,3 +35,4 @@ vendor/
 # OS files
 .DS_Store
 Thumbs.db
+main.bak
