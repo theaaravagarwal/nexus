@@ -36,59 +36,9 @@ Method 2: build a local binary:
 go build -o bin/nexus .
 ```
 
-Method 3: install via Homebrew (tap-based distribution):
+Method 3 (optional): install via Homebrew once a tap is published.
 
-```bash
-brew tap theaaravagarwal/nexus
-brew install nexus
-```
-
-Homebrew maintainer notes:
-
-1. Create a tap repository named `homebrew-nexus`.
-2. On each release, publish tarballs for supported platforms.
-3. Compute SHA256 checksums.
-4. Add `Formula/nexus.rb` in the tap repo with release URLs and checksums.
-
-Minimal formula template:
-
-```ruby
-class Nexus < Formula
-  desc "SSH and remote file sync CLI"
-  homepage "https://github.com/theaaravagarwal/nexus"
-  version "0.1.0"
-
-  on_macos do
-    on_arm do
-      url "https://github.com/theaaravagarwal/nexus/releases/download/v0.1.0/nexus_Darwin_arm64.tar.gz"
-      sha256 "<sha256-darwin-arm64>"
-    end
-    on_intel do
-      url "https://github.com/theaaravagarwal/nexus/releases/download/v0.1.0/nexus_Darwin_x86_64.tar.gz"
-      sha256 "<sha256-darwin-amd64>"
-    end
-  end
-
-  on_linux do
-    on_arm do
-      url "https://github.com/theaaravagarwal/nexus/releases/download/v0.1.0/nexus_Linux_arm64.tar.gz"
-      sha256 "<sha256-linux-arm64>"
-    end
-    on_intel do
-      url "https://github.com/theaaravagarwal/nexus/releases/download/v0.1.0/nexus_Linux_x86_64.tar.gz"
-      sha256 "<sha256-linux-amd64>"
-    end
-  end
-
-  def install
-    bin.install "nexus"
-  end
-
-  test do
-    assert_match "Usage:", shell_output("#{bin}/nexus --help")
-  end
-end
-```
+Current status: no public Homebrew tap is available yet.
 
 ## Quick Start
 
