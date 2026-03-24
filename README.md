@@ -36,10 +36,6 @@ Method 2: build a local binary:
 go build -o bin/nexus .
 ```
 
-Method 3 (optional): install via Homebrew once a tap is published.
-
-Current status: no public Homebrew tap is available yet.
-
 ## Quick Start
 
 ```bash
@@ -141,6 +137,23 @@ Config keys:
 
 ```bash
 go test ./...
+go vet ./...
 ```
 
-Current status: packages compile; there are no test files yet.
+Optional local lint:
+
+```bash
+golangci-lint run ./...
+```
+
+## Release
+
+- Releases are automated from git tags (`v*`) via GitHub Actions + GoReleaser.
+- Artifacts are published for macOS and Linux (`amd64`, `arm64`) with checksums.
+
+## Community
+
+- Contributions: `CONTRIBUTING.md`
+- Security reporting: `SECURITY.md`
+- Code of conduct: `CODE_OF_CONDUCT.md`
+- Changelog: `CHANGELOG.md`
