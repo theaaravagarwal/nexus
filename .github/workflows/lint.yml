@@ -1,4 +1,4 @@
-name: ci
+name: lint
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  golangci:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -23,14 +23,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify module graph
-        run: go mod tidy && git diff --exit-code
-
-      - name: Test
-        run: go test ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Build
-        run: go build ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.1.6
+          args: --timeout=5m

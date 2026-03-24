@@ -1,16 +1,18 @@
-name: ci
+name: security
 
 on:
   pull_request:
   push:
     branches:
       - main
+  schedule:
+    - cron: "0 9 * * 1"
 
 permissions:
   contents: read
 
 jobs:
-  validate:
+  govulncheck:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -23,14 +25,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify module graph
-        run: go mod tidy && git diff --exit-code
-
-      - name: Test
-        run: go test ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Build
-        run: go build ./...
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
