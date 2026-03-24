@@ -94,7 +94,7 @@ end
 
 ```bash
 # 1) add a host once
-nexus host add user@10.0.0.55
+nexus host add user@example-host
 
 # 2) open SSH session (interactive host picker if omitted)
 nexus ssh
@@ -135,18 +135,30 @@ On first run, nexus bootstraps:
 - `~/.config/nexus/hosts.json`
 - `~/.config/nexus/config.yaml`
 
-Default config:
+Default config template:
 
 ```yaml
 # NEXUS settings
+# Maximum recursion depth when --remote-index full is used.
 full_index_depth: 5
 
-# Host profiles
+# Optional per-host overrides.
+# Keys must match the host part of your saved user@host entries.
+# Example: if you add "alice@server.local", use "server.local" as the key.
 host_profiles:
-  10.0.0.55:
+  <host-or-ip>:
+    # Force Unix command style on remote discovery for this host.
     use_unix_discovery: true
+    # Use conservative rsync args for flaky/mixed environments.
     rsync_stability: true
 ```
+
+How to use the config:
+
+1. Add hosts with `nexus host add user@host`.
+2. Open the config with `nexus config`.
+3. Under `host_profiles`, add one entry per remote using only the host/IP part (not `user@`).
+4. Save and run `nexus pull`/`nexus push`; overrides are applied automatically for matching hosts.
 
 Config keys:
 

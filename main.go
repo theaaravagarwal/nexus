@@ -314,7 +314,18 @@ func ensureConfigFile(configPath string) error {
 }
 
 func defaultConfigYAML() string {
-	return "# NEXUS settings\nfull_index_depth: 5\n\n# Host profiles\nhost_profiles:\n  10.0.0.55:\n    use_unix_discovery: true\n    rsync_stability: true\n"
+	return "# NEXUS settings\n" +
+		"# Maximum recursion depth when --remote-index full is used.\n" +
+		"full_index_depth: 5\n\n" +
+		"# Optional per-host overrides.\n" +
+		"# Keys must match the host part of your saved user@host entries.\n" +
+		"# Example: if you add \"alice@server.local\", use \"server.local\" as the key.\n" +
+		"host_profiles:\n" +
+		"  <host-or-ip>:\n" +
+		"    # Force Unix command style on remote discovery for this host.\n" +
+		"    use_unix_discovery: true\n" +
+		"    # Use conservative rsync args for flaky/mixed environments.\n" +
+		"    rsync_stability: true\n"
 }
 
 func loadConfigFromYAML(configPath string) (map[string]discoveryProfile, int, error) {
