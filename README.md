@@ -39,7 +39,7 @@ go build -o bin/nexus .
 Method 3: install via Homebrew (tap-based distribution):
 
 ```bash
-brew tap <your-github-user>/nexus
+brew tap theaaravagarwal/nexus
 brew install nexus
 ```
 
@@ -55,27 +55,27 @@ Minimal formula template:
 ```ruby
 class Nexus < Formula
   desc "SSH and remote file sync CLI"
-  homepage "https://github.com/<your-github-user>/nexus"
+  homepage "https://github.com/theaaravagarwal/nexus"
   version "0.1.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/<your-github-user>/nexus/releases/download/v0.1.0/nexus_Darwin_arm64.tar.gz"
+      url "https://github.com/theaaravagarwal/nexus/releases/download/v0.1.0/nexus_Darwin_arm64.tar.gz"
       sha256 "<sha256-darwin-arm64>"
     end
     on_intel do
-      url "https://github.com/<your-github-user>/nexus/releases/download/v0.1.0/nexus_Darwin_x86_64.tar.gz"
+      url "https://github.com/theaaravagarwal/nexus/releases/download/v0.1.0/nexus_Darwin_x86_64.tar.gz"
       sha256 "<sha256-darwin-amd64>"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/<your-github-user>/nexus/releases/download/v0.1.0/nexus_Linux_arm64.tar.gz"
+      url "https://github.com/theaaravagarwal/nexus/releases/download/v0.1.0/nexus_Linux_arm64.tar.gz"
       sha256 "<sha256-linux-arm64>"
     end
     on_intel do
-      url "https://github.com/<your-github-user>/nexus/releases/download/v0.1.0/nexus_Linux_x86_64.tar.gz"
+      url "https://github.com/theaaravagarwal/nexus/releases/download/v0.1.0/nexus_Linux_x86_64.tar.gz"
       sha256 "<sha256-linux-amd64>"
     end
   end
