@@ -27,8 +27,7 @@ const connectTimeoutSeconds = "5"
 const defaultFullIndexDepth = 5
 
 var (
-	errCancelled       = errors.New("selection cancelled")
-	errHostUnreachable = errors.New("host unreachable")
+	errCancelled = errors.New("selection cancelled")
 
 	userPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	hostPattern = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)$`)
@@ -625,113 +624,6 @@ func (a *app) resolveHostForTransfer(arg string) (string, error) {
 	return host, nil
 }
 
-func chooseManualValue(prompt, preset string) (string, error) {
-	preset = strings.TrimSpace(preset)
-	if preset != "" {
-		return preset, nil
-	}
-
-	query, selected, err := selectOrQueryFZF(prompt, nil)
-	if err != nil {
-		return "", err
-	}
-
-	value := strings.TrimSpace(selected)
-	if value == "" {
-		value = strings.TrimSpace(query)
-	}
-	if value == "" {
-		return "", errCancelled
-	}
-	return value, nil
-}
-
-func runLocalFindForPicker(base string, maxDepth int, dirsOnly bool) ([]string, error) {
-	if _, err := exec.LookPath("find"); err != nil {
-		return nil, fmt.Errorf("find not found in PATH: %w", err)
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve home directory: %w", err)
-	}
-
-	scanBase := filepath.Join(home, base)
-	if filepath.IsAbs(base) {
-		scanBase = base
-	}
-	scanBase = filepath.Clean(scanBase)
-	ignoreRegex, _ := localIgnoreRegex(scanBase)
-	quotedRegex := shellQuote(ignoreRegex)
-	depthArg := ""
-	if maxDepth > 0 {
-		depthArg = fmt.Sprintf(" -maxdepth %d", maxDepth)
-	}
-	findCmd := fmt.Sprintf("find .%s -type d -print 2>/dev/null | grep -vE %s | sort", depthArg, quotedRegex)
-	if !dirsOnly {
-		findCmd = fmt.Sprintf("%s; find .%s -type f -print 2>/dev/null | grep -vE %s | sort", findCmd, depthArg, quotedRegex)
-	}
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("cd %s && { %s; } || true", shellQuote(scanBase), findCmd))
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.Stdin = os.Stdin
-
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if strings.Contains(strings.ToLower(msg), "permission denied") {
-			// Keep partial results so restricted folders do not break picker navigation.
-		} else if msg == "" {
-			msg = err.Error()
-			return nil, fmt.Errorf("local path scan failed: %s", msg)
-		} else {
-			return nil, fmt.Errorf("local path scan failed: %s", msg)
-		}
-	}
-
-	lines := strings.Split(strings.ReplaceAll(stdout.String(), "\r\n", "\n"), "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || line == "." {
-			continue
-		}
-		line = strings.TrimPrefix(filepath.ToSlash(line), "./")
-		out = append(out, filepath.ToSlash(filepath.Join(scanBase, line)))
-	}
-	sort.Strings(out)
-	if len(out) == 0 {
-		return nil, errors.New("no local paths found")
-	}
-	return out, nil
-}
-
-func runRemoteFindForPicker(host, base string, maxDepth int, dirsOnly bool) ([]string, error) {
-	paths, _, err := runRemoteFindForPickerDetailed(host, base, maxDepth, dirsOnly, false)
-	return paths, err
-}
-
-func runRemoteFindForPickerDetailed(host, base string, maxDepth int, dirsOnly bool, fullIndex bool) ([]string, bool, error) {
-	_ = maxDepth
-
-	user, cleanHost := splitUserHost(host)
-	action := "push"
-	if !dirsOnly {
-		action = "pull"
-	}
-	return getRemotePathsInternal(user, cleanHost, base, fullIndex, action)
-}
-
-func GetRemotePaths(user, host, remotePath string) ([]string, error) {
-	paths, _, err := getRemotePathsInternal(user, host, remotePath, false, "pull")
-	return paths, err
-}
-
-func GetRemoteLayer(user, host, remotePath string, fullIndex bool, action string) ([]string, bool, error) {
-	return getRemotePathsInternal(user, host, remotePath, fullIndex, action)
-}
-
 func getRemotePathsInternal(user, host, remotePath string, fullIndex bool, action string) ([]string, bool, error) {
 	if _, err := exec.LookPath("ssh"); err != nil {
 		return nil, false, fmt.Errorf("ssh not found in PATH: %w", err)
@@ -793,10 +685,6 @@ func getRemotePathsInternal(user, host, remotePath string, fullIndex bool, actio
 				detectedWindows = true
 				detectedMu.Unlock()
 			}
-			_, skip := cleanRemoteDiscoveryLine(scannerErr.Text())
-			if skip {
-				continue
-			}
 		}
 	}()
 
@@ -849,6 +737,10 @@ func getRemotePathsInternal(user, host, remotePath string, fullIndex bool, actio
 	windowsHost := detectedWindows
 	detectedMu.Unlock()
 	return dedupeKeepOrder(out), windowsHost, nil
+}
+
+func GetRemoteLayer(user, host, remotePath string, fullIndex bool, action string) ([]string, bool, error) {
+	return getRemotePathsInternal(user, host, remotePath, fullIndex, action)
 }
 
 func buildRemoteDiscoveryCommand(remotePath string, fullIndex bool, action string, ignoreRegex string, forceUnix bool, autoWindows bool) string {
@@ -940,9 +832,7 @@ func normalizeDiscoveryEntry(entry, base string) (string, bool) {
 	if strings.HasPrefix(entry, base+"/") {
 		entry = strings.TrimPrefix(entry, base+"/")
 	}
-	if strings.HasPrefix(entry, "./") {
-		entry = strings.TrimPrefix(entry, "./")
-	}
+	entry = strings.TrimPrefix(entry, "./")
 	if entry == "" || entry == "." {
 		return "", false
 	}
@@ -963,76 +853,6 @@ func isExitStatus255(err error) bool {
 		return false
 	}
 	return exitErr.ExitCode() == 255
-}
-
-func runRemoteFindForPickerWithFallback(host string, maxDepth int, dirsOnly bool) ([]string, error) {
-	candidates := []string{
-		defaultRemoteWindowsBase(host),
-		"/C/Users",
-		".",
-		"/",
-	}
-
-	seen := make(map[string]struct{}, len(candidates))
-	var lastErr error
-	for _, base := range candidates {
-		base = strings.TrimSpace(base)
-		if base == "" {
-			continue
-		}
-		if _, ok := seen[base]; ok {
-			continue
-		}
-		seen[base] = struct{}{}
-
-		paths, err := runRemoteFindForPicker(host, base, maxDepth, dirsOnly)
-		if err == nil && len(paths) > 0 {
-			return paths, nil
-		}
-		if err != nil {
-			lastErr = err
-		}
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no remote paths found on %s", host)
-	}
-	return nil, lastErr
-}
-
-func runRemoteFindForPickerWithFallbackDetailed(host string, maxDepth int, dirsOnly bool, fullIndex bool) ([]string, bool, error) {
-	candidates := []string{
-		defaultRemoteWindowsBase(host),
-		"/C/Users",
-		".",
-		"/",
-	}
-
-	seen := make(map[string]struct{}, len(candidates))
-	var lastErr error
-	detectedWindows := false
-	for _, base := range candidates {
-		base = strings.TrimSpace(base)
-		if base == "" {
-			continue
-		}
-		if _, ok := seen[base]; ok {
-			continue
-		}
-		seen[base] = struct{}{}
-
-		paths, windowsHost, err := runRemoteFindForPickerDetailed(host, base, maxDepth, dirsOnly, fullIndex)
-		detectedWindows = detectedWindows || windowsHost
-		if err == nil && len(paths) > 0 {
-			return paths, detectedWindows, nil
-		}
-		if err != nil {
-			lastErr = err
-		}
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no remote paths found on %s", host)
-	}
-	return nil, detectedWindows, lastErr
 }
 
 func defaultRemoteWindowsBase(host string) string {
@@ -1215,11 +1035,6 @@ func ensureTrailingSlashForMode(raw string, isRemote bool) string {
 
 func syncSelectionTokens(currentPath string, isRemote bool, isDestination bool) (string, string) {
 	if isRemote {
-		base := normalizeRemotePathForRsync(currentPath)
-		base = strings.TrimSuffix(base, "/")
-		if base == "" {
-			base = "."
-		}
 		if isDestination {
 			return "[SYNC CONTENTS (Files Only)]", ""
 		}
@@ -1639,55 +1454,6 @@ func (a *app) chooseHostAllowNew() (string, error) {
 	return candidate, nil
 }
 
-func (a *app) chooseKnownHost(prompt string) (string, error) {
-	hosts, err := a.readHosts()
-	if err != nil {
-		return "", err
-	}
-	if len(hosts) == 0 {
-		return "", errors.New("no hosts in history; add one with `nexus host add user@ip` or use `nexus ssh`")
-	}
-
-	return selectFromFZF(prompt, hosts)
-}
-
-func selectFromFZF(prompt string, options []string) (string, error) {
-	if _, err := exec.LookPath("fzf"); err != nil {
-		return "", errors.New("fzf not found in PATH")
-	}
-
-	if len(options) == 0 {
-		return "", errCancelled
-	}
-
-	args := []string{
-		"--height", "40%",
-		"--layout", "reverse",
-		"--border",
-		"--prompt", prompt,
-	}
-
-	cmd := exec.Command("fzf", args...)
-	cmd.Stdin = strings.NewReader(strings.Join(options, "\n"))
-	cmd.Stderr = os.Stderr
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		if isFZFCancel(err) {
-			return "", errCancelled
-		}
-		return "", fmt.Errorf("fzf failed: %w", err)
-	}
-
-	selected := strings.TrimSpace(out.String())
-	if selected == "" {
-		return "", errCancelled
-	}
-	return selected, nil
-}
-
 func selectOrQueryFZF(prompt string, options []string) (string, string, error) {
 	if _, err := exec.LookPath("fzf"); err != nil {
 		return "", "", errors.New("fzf not found in PATH")
@@ -1744,6 +1510,43 @@ func selectOrQueryFZF(prompt string, options []string) (string, string, error) {
 	return query, selected, nil
 }
 
+func selectFromFZF(prompt string, options []string) (string, error) {
+	if _, err := exec.LookPath("fzf"); err != nil {
+		return "", errors.New("fzf not found in PATH")
+	}
+
+	if len(options) == 0 {
+		return "", errCancelled
+	}
+
+	args := []string{
+		"--height", "40%",
+		"--layout", "reverse",
+		"--border",
+		"--prompt", prompt,
+	}
+
+	cmd := exec.Command("fzf", args...)
+	cmd.Stdin = strings.NewReader(strings.Join(options, "\n"))
+	cmd.Stderr = os.Stderr
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	if err := cmd.Run(); err != nil {
+		if isFZFCancel(err) {
+			return "", errCancelled
+		}
+		return "", fmt.Errorf("fzf failed: %w", err)
+	}
+
+	selected := strings.TrimSpace(out.String())
+	if selected == "" {
+		return "", errCancelled
+	}
+	return selected, nil
+}
+
 func isFZFCancel(err error) bool {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
@@ -1780,68 +1583,12 @@ func runInteractiveSSH(host string) error {
 		return fmt.Errorf("ssh not found in PATH: %w", err)
 	}
 
-	cmd := buildSSHCommand(nil, host, true, "")
+	cmd := buildSSHCommand(context.Background(), host, true, "")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
-}
-
-func listRemotePaths(host string) ([]string, error) {
-	remoteCmd := remoteBasePathScript() + `; find "$base" -maxdepth 3 \( -path "*/.git" -o -path "*/.git/*" \) -prune -o -mindepth 1 -print 2>/dev/null`
-	return runRemoteFind(host, remoteCmd)
-}
-
-func listRemoteDirs(host string) ([]string, error) {
-	remoteCmd := remoteBasePathScript() + `; find "$base" \( -path "*/.git" -o -path "*/.git/*" \) -prune -o -type d -print 2>/dev/null`
-	return runRemoteFind(host, remoteCmd)
-}
-
-func remoteBasePathScript() string {
-	return `base="${HOME:-.}"; if command -v cygpath >/dev/null 2>&1 && [ -n "${USERPROFILE:-}" ]; then up=$(cygpath -u "$USERPROFILE" 2>/dev/null); if [ -n "$up" ]; then base="$up"; fi; fi`
-}
-
-func runRemoteFind(host, remoteCmd string) ([]string, error) {
-	if _, err := exec.LookPath("ssh"); err != nil {
-		return nil, fmt.Errorf("ssh not found in PATH: %w", err)
-	}
-
-	cmd := buildSSHCommand(nil, host, false, remoteCmd)
-	logVerbose("remote find command for %s: %s", host, remoteCmd)
-	logVerbose("ssh invocation: %s", formatCommand(cmd.Path, cmd.Args[1:]))
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.Stdin = os.Stdin
-
-	if err := cmd.Run(); err != nil {
-		stderrText := strings.TrimSpace(stderr.String())
-		errText := strings.ToLower(stderrText)
-		if errText == "" {
-			errText = strings.ToLower(err.Error())
-		}
-		if isNetworkUnreachableError(errText) {
-			return nil, errHostUnreachable
-		}
-		if stderrText == "" {
-			stderrText = err.Error()
-		}
-		return nil, fmt.Errorf("host lookup failed for %s: %s", host, stderrText)
-	}
-
-	lines := strings.Split(strings.ReplaceAll(stdout.String(), "\r\n", "\n"), "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		out = append(out, line)
-	}
-	return out, nil
 }
 
 func detectWindowsTarget(host, candidatePath string) bool {
