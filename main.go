@@ -48,7 +48,6 @@ type app struct {
 	configDir   string
 	configFile  string
 	hostsFile   string
-	dryRun      bool
 	verbose     bool
 	remoteIndex string
 }
@@ -91,9 +90,8 @@ func (a *app) newRootCmd() *cobra.Command {
 			return a.ensureBootstrap()
 		},
 	}
-	root.PersistentFlags().BoolVarP(&a.dryRun, "dry-run", "n", false, "Print rsync command without transferring files")
 	root.PersistentFlags().BoolVarP(&a.verbose, "verbose", "v", false, "Enable verbose debug logs")
-	root.PersistentFlags().StringVar(&a.remoteIndex, "remote-index", "lazy", "Remote discovery mode: lazy or full")
+	root.PersistentFlags().StringVarP(&a.remoteIndex, "indexing", "i", "lazy", "Indexing mode: lazy or full")
 
 	root.AddCommand(a.newSSHCmd())
 	root.AddCommand(a.newPullCmd())
@@ -315,7 +313,7 @@ func ensureConfigFile(configPath string) error {
 
 func defaultConfigYAML() string {
 	return "# NEXUS settings\n" +
-		"# Maximum recursion depth when --remote-index full is used.\n" +
+		"# Maximum recursion depth when --indexing full is used.\n" +
 		"full_index_depth: 5\n\n" +
 		"# Optional per-host overrides.\n" +
 		"# Keys must match the host part of your saved user@host entries.\n" +
@@ -497,7 +495,7 @@ func (a *app) newPullCmd() *cobra.Command {
 			localDest = normalizeLocalPathForRsync(localDest)
 
 			source := formatRemoteEndpoint(host, remoteSource, remoteIsWindows)
-			if err := runRsync(source, localDest, a.dryRun, rsyncOptions{
+			if err := runRsync(source, localDest, rsyncOptions{
 				forceRemoteRsyncPath: remoteIsWindows || stabilityProfile,
 				stabilityProfile:     stabilityProfile,
 			}); err != nil {
@@ -597,7 +595,7 @@ func (a *app) newPushCmd() *cobra.Command {
 			source := normalizeLocalPathForRsync(localPath)
 			targetDir := normalizeRemotePathForRsync(remoteDir)
 			target := formatRemoteEndpoint(host, strings.TrimRight(targetDir, "/")+"/", remoteIsWindows)
-			if err := runRsync(source, target, a.dryRun, rsyncOptions{
+			if err := runRsync(source, target, rsyncOptions{
 				forceRemoteRsyncPath: remoteIsWindows || stabilityProfile,
 				stabilityProfile:     stabilityProfile,
 			}); err != nil {
@@ -1917,7 +1915,7 @@ type rsyncOptions struct {
 	stabilityProfile     bool
 }
 
-func runRsync(source, destination string, dryRun bool, opts rsyncOptions) error {
+func runRsync(source, destination string, opts rsyncOptions) error {
 	rsyncBin, err := resolveRsyncBinary()
 	if err != nil {
 		return err
@@ -1926,10 +1924,7 @@ func runRsync(source, destination string, dryRun bool, opts rsyncOptions) error 
 	source = normalizeRemoteEndpointPath(source)
 	destination = normalizeRemoteEndpointPath(destination)
 
-	args := buildRsyncArgs(source, destination, dryRun, opts)
-	if dryRun {
-		fmt.Fprintf(os.Stdout, "Dry run: %s\n", formatCommand(rsyncBin, args))
-	}
+	args := buildRsyncArgs(source, destination, opts)
 
 	if err := runRsyncCommand(rsyncBin, args); err != nil {
 		// Mixed Windows/MSYS/OpenSSH stacks can intermittently fail with code 12.
@@ -1938,11 +1933,8 @@ func runRsync(source, destination string, dryRun bool, opts rsyncOptions) error 
 			retryOpts := opts
 			retryOpts.stabilityProfile = true
 			retryOpts.forceRemoteRsyncPath = true
-			retryArgs := buildRsyncArgs(source, destination, dryRun, retryOpts)
+			retryArgs := buildRsyncArgs(source, destination, retryOpts)
 			logVerbose("rsync code 12 detected; retrying with stability profile: %s", formatCommand(rsyncBin, retryArgs))
-			if dryRun {
-				fmt.Fprintf(os.Stdout, "Dry run (stability retry): %s\n", formatCommand(rsyncBin, retryArgs))
-			}
 			if retryErr := runRsyncCommand(rsyncBin, retryArgs); retryErr == nil {
 				return nil
 			}
@@ -1952,7 +1944,7 @@ func runRsync(source, destination string, dryRun bool, opts rsyncOptions) error 
 	return nil
 }
 
-func buildRsyncArgs(source, destination string, dryRun bool, opts rsyncOptions) []string {
+func buildRsyncArgs(source, destination string, opts rsyncOptions) []string {
 	args := []string{
 		"-av",
 		// If discovery + transfer are separate SSH sessions, password auth can prompt twice.
@@ -1976,9 +1968,6 @@ func buildRsyncArgs(source, destination string, dryRun bool, opts rsyncOptions) 
 		"--no-g",
 		"--chmod=ugo=rwX",
 	)
-	if dryRun {
-		args = append(args, "--dry-run")
-	}
 	args = append(args, source, destination)
 	return args
 }

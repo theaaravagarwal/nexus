@@ -70,9 +70,19 @@ Commands:
 
 Global flags:
 
-- `-n, --dry-run`: print `rsync` command without transferring.
+- `-i, --indexing lazy|full`: indexing mode used by interactive path discovery (default `lazy`).
 - `-v, --verbose`: enable debug logs.
-- `--remote-index lazy|full`: remote discovery mode (default `lazy`).
+
+Indexing mode quick guide:
+
+- `lazy`: fast, shallow discovery for large filesystems.
+- `full`: deeper recursive discovery (depth controlled by `full_index_depth`).
+
+Example:
+
+```bash
+nexus -i full pull
+```
 
 ## Configuration
 
@@ -85,7 +95,7 @@ Default config template:
 
 ```yaml
 # NEXUS settings
-# Maximum recursion depth when --remote-index full is used.
+# Maximum recursion depth when --indexing full is used.
 full_index_depth: 5
 
 # Optional per-host overrides.
@@ -108,7 +118,7 @@ How to use the config:
 
 Config keys:
 
-- `full_index_depth`: max depth used in `--remote-index full` mode.
+- `full_index_depth`: max depth used in `--indexing full` mode.
 - `host_profiles.<host>.use_unix_discovery`: force Unix-style discovery commands for that host.
 - `host_profiles.<host>.rsync_stability`: enables conservative `rsync` profile for reliability on mixed environments.
 
