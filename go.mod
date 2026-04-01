@@ -1,6 +1,6 @@
 module nexus
 
-go 1.22
+go 1.25.8
 
 require (
 	github.com/spf13/cobra v1.8.1

@@ -17,7 +17,7 @@ CLI for SSH sessions and remote file sync workflows.
 
 ## Requirements
 
-- Go `1.22+`
+- Go `1.25.8+`
 - `ssh` in `PATH`
 - `rsync` in `PATH` (or set `NEXUS_RSYNC_PATH`)
 - `fzf` in `PATH` (required for interactive selection)
