@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,23 @@ func TestRequiresElevatedNetworkAccess(t *testing.T) {
 	}
 	if requiresElevatedNetworkAccess("speedtest-cli") {
 		t.Fatal("speedtest-cli should not require elevation")
+	}
+}
+
+func TestDiagnosticsAlwaysIncludePortableUnixFallbacks(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates []string
+		want       string
+	}{
+		{"monitor", monitorProbeCandidates, "top"},
+		{"network", networkProbeCandidates, "ip -s link"},
+		{"storage", storageProbeCandidates, "df -h"},
+	}
+	for _, tc := range tests {
+		if !slices.Contains(tc.candidates, tc.want) {
+			t.Fatalf("%s candidates missing %q: %v", tc.name, tc.want, tc.candidates)
+		}
 	}
 }
 

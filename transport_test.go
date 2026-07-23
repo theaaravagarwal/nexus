@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -77,6 +79,21 @@ func TestProfileForHostIgnoresUserAndPort(t *testing.T) {
 	loadedConfig.HostProfiles["example.com"] = discoveryProfile{RsyncStability: true}
 	if !profileForHost("alice@example.com:2222").RsyncStability {
 		t.Fatal("profile lookup did not ignore user and port")
+	}
+}
+
+func TestRemoteShellExitIsNotAConnectionFailure(t *testing.T) {
+	err := exec.Command("sh", "-c", "exit 1").Run()
+	if !isRemoteShellExit(err) {
+		t.Fatalf("remote shell status should be treated as a completed connection: %v", err)
+	}
+	transportErr := exec.Command("sh", "-c", "exit 255").Run()
+	if isRemoteShellExit(transportErr) {
+		t.Fatalf("transport status 255 was treated as a remote shell exit: %v", transportErr)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("test setup produced %v", err)
 	}
 }
 

@@ -14,24 +14,58 @@ import (
 
 var errNoRemoteProbeCandidates = errors.New("no remote probe candidates available")
 
+var (
+	monitorProbeCandidates = []string{"btop", "btm", "bashtop", "htop", "top"}
+	networkProbeCandidates = []string{
+		"iftop", "nload", "iptraf-ng", "speedtest-cli", "speedtest",
+		"ip -s link", "ifconfig", "netstat -i",
+	}
+	storageProbeCandidates = []string{"duf", "dust", "ncdu", "df -h"}
+)
+
 func (a *app) newTopCmd() *cobra.Command {
 	return a.newDiagnosticCommand(
 		"top [user@host[:port]]",
 		[]string{"btop"},
 		"Open a remote system monitor",
-		[]string{"btop", "btm", "bashtop", "htop", "top"},
+		monitorProbeCandidates,
 		false,
 	)
 }
 
 func (a *app) newNetCmd() *cobra.Command {
-	return a.newDiagnosticCommand(
+	command := a.newDiagnosticCommand(
 		"net [user@host[:port]]",
 		[]string{"network", "bandwidth"},
 		"Inspect remote network throughput",
-		[]string{"iftop", "nload", "iptraf-ng", "speedtest-cli", "speedtest"},
+		networkProbeCandidates,
 		true,
 	)
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		host, err := a.resolveDiagnosticHost(args)
+		if errors.Is(err, errCancelled) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		err = runRemoteProbe(host, networkProbeCandidates, true)
+		if errors.Is(err, errNoRemoteProbeCandidates) {
+			fmt.Printf("No network utility found on %s; using portable interface counters\n", host)
+			summary := `printf '%s\n' 'Network interfaces'; ` +
+				`if [ -r /proc/net/dev ]; then cat /proc/net/dev; ` +
+				`else printf '%s\n' 'No portable interface counters are exposed by this system.'; fi`
+			err = runRemoteInteractiveCommand(host, summary)
+		}
+		if err != nil {
+			return fmt.Errorf("net failed: %w", err)
+		}
+		if err := a.recordSuccess(host); err != nil {
+			logVerbose("failed to record host activity: %v", err)
+		}
+		return nil
+	}
+	return command
 }
 
 func (a *app) newInfoCmd() *cobra.Command {
@@ -89,7 +123,7 @@ func (a *app) newStorageCmd() *cobra.Command {
 		"storage [user@host[:port]]",
 		[]string{"disk", "du", "io"},
 		"Inspect remote disk usage and I/O health",
-		[]string{"duf", "dust", "ncdu", "df -h"},
+		storageProbeCandidates,
 		false,
 	)
 }

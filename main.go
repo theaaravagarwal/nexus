@@ -1640,7 +1640,25 @@ func runInteractiveSSH(host string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	return cmd.Run()
+	err = cmd.Run()
+	if isRemoteShellExit(err) {
+		var exitErr *exec.ExitError
+		_ = errors.As(err, &exitErr)
+		logVerbose("remote shell exited with status %d", exitErr.ExitCode())
+		return nil
+	}
+	return err
+}
+
+func isRemoteShellExit(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	// OpenSSH reserves 255 for transport/authentication failures. Any other
+	// positive status came from a successfully opened remote command or shell.
+	code := exitErr.ExitCode()
+	return code > 0 && code < 255
 }
 
 func detectWindowsTarget(host, candidatePath string) bool {

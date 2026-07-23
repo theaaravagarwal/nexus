@@ -25,6 +25,27 @@ func TestDashboardFiltersAndChoosesAction(t *testing.T) {
 	}
 }
 
+func TestDashboardDirectActionsDispatchExpectedCommands(t *testing.T) {
+	tests := []struct {
+		key    rune
+		action dashboardAction
+	}{
+		{'p', actionPull},
+		{'u', actionPush},
+		{'i', actionInfo},
+		{'n', actionNet},
+		{'d', actionStorage},
+	}
+	for _, tc := range tests {
+		model := newDashboardModel([]string{"alice@one:2222"})
+		updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tc.key}})
+		got := updated.(dashboardModel)
+		if cmd == nil || got.choice.Action != tc.action || got.choice.Host != "alice@one:2222" {
+			t.Fatalf("key=%q choice=%#v cmd=%v", tc.key, got.choice, cmd)
+		}
+	}
+}
+
 func TestDashboardNavigationAndCommandFilter(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.focus = focusNavigation
