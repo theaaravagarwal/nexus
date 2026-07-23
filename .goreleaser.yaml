@@ -36,4 +36,5 @@ checksum:
   name_template: checksums.txt
 
 changelog:
-  use: github
+  use: git
+  format: "* {{ .Message }}"
