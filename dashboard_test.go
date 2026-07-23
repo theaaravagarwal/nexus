@@ -32,7 +32,6 @@ func TestDashboardDirectActionsDispatchExpectedCommands(t *testing.T) {
 	}{
 		{'p', actionPull},
 		{'u', actionPush},
-		{'i', actionInfo},
 		{'n', actionNet},
 		{'d', actionStorage},
 	}
@@ -46,14 +45,81 @@ func TestDashboardDirectActionsDispatchExpectedCommands(t *testing.T) {
 	}
 }
 
+func TestDashboardSystemRefreshStaysInsideTUI(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one:2222"})
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	got := updated.(dashboardModel)
+	if cmd == nil || got.done || got.choice.Action != "" || !got.metadataBusy["alice@one:2222"] {
+		t.Fatalf("refresh escaped TUI: choice=%#v done=%v busy=%v cmd=%v", got.choice, got.done, got.metadataBusy, cmd)
+	}
+}
+
+func TestDashboardProbeResultsStreamPerHost(t *testing.T) {
+	previous := loadedConfig.Reachability.Concurrency
+	loadedConfig.Reachability.Concurrency = 1
+	t.Cleanup(func() { loadedConfig.Reachability.Concurrency = previous })
+
+	model := newDashboardModel([]string{"alice@one", "bob@two"})
+	first := probeTargetMsg(reachabilityResult{Target: "alice@one", Status: reachOnline, Latency: 8 * time.Millisecond})
+	updated, cmd := model.Update(first)
+	model = updated.(dashboardModel)
+	if !model.probing || model.probeComplete != 1 || model.hosts[0].Reachability.Status != reachOnline || cmd == nil {
+		t.Fatalf("first streamed result=%#v cmd=%v", model, cmd)
+	}
+	second := probeTargetMsg(reachabilityResult{Target: "bob@two", Status: reachTimeout})
+	updated, cmd = model.Update(second)
+	model = updated.(dashboardModel)
+	if model.probing || model.probeComplete != 2 || model.hosts[1].Reachability.Status != reachTimeout || cmd == nil {
+		t.Fatalf("final streamed result=%#v cmd=%v", model, cmd)
+	}
+}
+
+func TestDashboardSavedCommandGuideExplainsSetup(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	model = updated.(dashboardModel)
+	if cmd != nil || !model.guideOpen {
+		t.Fatalf("saved-command guide did not open: cmd=%v model=%#v", cmd, model)
+	}
+	for _, want := range []string{"Reusable remote commands", "name: uptime", "host_profiles", "without confirmation"} {
+		if !strings.Contains(model.View(), want) {
+			t.Fatalf("guide missing %q:\n%s", want, model.View())
+		}
+	}
+}
+
+func TestDashboardSavedCommandConfirmationStaysInContext(t *testing.T) {
+	previous := loadedConfig
+	loadedConfig = defaultAppConfig()
+	loadedConfig.Commands = []commandConfig{{Name: "uptime", Description: "Show uptime", Command: "uptime"}}
+	t.Cleanup(func() { loadedConfig = previous })
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.commandOpen = true
+	model.commandQuery = "uptime"
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if cmd != nil || !model.confirmOpen || model.done {
+		t.Fatalf("confirmation escaped TUI: cmd=%v model=%#v", cmd, model)
+	}
+	for _, want := range []string{"CONFIRM SAVED COMMAND", "alice@one", "uptime", "[y/enter] run"} {
+		if !strings.Contains(model.View(), want) {
+			t.Fatalf("confirmation missing %q:\n%s", want, model.View())
+		}
+	}
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	model = updated.(dashboardModel)
+	if cmd != nil || model.confirmOpen || model.done {
+		t.Fatalf("confirmation did not cancel in place: cmd=%v model=%#v", cmd, model)
+	}
+}
+
 func TestDashboardNavigationAndCommandFilter(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
-	model.focus = focusNavigation
-	model.navCursor = 2
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	model = updated.(dashboardModel)
 	if !model.commandOpen {
-		t.Fatal("Commands navigation item did not open palette")
+		t.Fatal("command key did not open palette")
 	}
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("storage")})
 	model = updated.(dashboardModel)
@@ -65,8 +131,10 @@ func TestDashboardNavigationAndCommandFilter(t *testing.T) {
 
 func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
-	model.focus = focusNavigation
-	model.navCursor = 4
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("theme")})
+	model = updated.(dashboardModel)
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(dashboardModel)
 	if cmd != nil || !model.themeOpen {
@@ -96,14 +164,19 @@ func TestDashboardStartsInCheckingState(t *testing.T) {
 func TestDashboardTopologyToggleChangesWideWorkspace(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.width, model.height = 120, 30
-	if view := model.View(); !strings.Contains(view, "FLEET CONSTELLATION") {
-		t.Fatalf("initial view missing topology:\n%s", view)
+	if view := model.View(); strings.Contains(view, "FLEET") {
+		t.Fatalf("fleet should use progressive disclosure:\n%s", view)
 	}
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	model = updated.(dashboardModel)
 	view := model.View()
-	if strings.Contains(view, "FLEET CONSTELLATION") || !strings.Contains(view, "show map") {
-		t.Fatalf("topology toggle had no visible effect:\n%s", view)
+	if !strings.Contains(view, "FLEET") || !strings.Contains(view, "Saved endpoints") {
+		t.Fatalf("fleet overlay did not open:\n%s", view)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(dashboardModel)
+	if strings.Contains(model.View(), "Saved endpoints ·") {
+		t.Fatal("fleet overlay did not close")
 	}
 }
 
@@ -124,9 +197,14 @@ func TestDashboardViewsRemainInformativeAcrossWidths(t *testing.T) {
 			}
 		}
 		if width == 120 {
-			for _, want := range []string{"FLEET CONSTELLATION", "QUICK ACTIONS", "SYSTEM SNAPSHOT", "TOOLS"} {
+			for _, want := range []string{"SYSTEM", "SAVED COMMANDS"} {
 				if !strings.Contains(view, want) {
 					t.Fatalf("wide layout missing %q:\n%s", want, view)
+				}
+			}
+			for _, unwanted := range []string{"FLEET CONSTELLATION", "QUICK ACTIONS", "STATUS"} {
+				if strings.Contains(view, unwanted) {
+					t.Fatalf("wide layout retained clutter %q:\n%s", unwanted, view)
 				}
 			}
 		}
@@ -162,7 +240,7 @@ func TestDashboardRenderStaysWithinTerminalBounds(t *testing.T) {
 
 func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 	for _, size := range [][2]int{{40, 16}, {72, 20}, {120, 32}} {
-		for _, overlay := range []string{"help", "commands", "themes"} {
+		for _, overlay := range []string{"help", "commands", "themes", "guide", "confirm", "fleet"} {
 			model := newDashboardModel([]string{"alice@one"})
 			model.width, model.height = size[0], size[1]
 			switch overlay {
@@ -172,6 +250,16 @@ func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 				model.commandOpen = true
 			case "themes":
 				model.openThemePreview()
+			case "guide":
+				model.guideOpen = true
+			case "confirm":
+				model.confirmOpen = true
+				model.confirmAction = dashboardSelection{
+					Action: actionCustom, Host: "alice@one",
+					Command: commandConfig{Name: "uptime", Command: "uptime"},
+				}
+			case "fleet":
+				model.showTopology = true
 			}
 			assertTerminalBounds(t, model.View(), size[0], size[1], overlay)
 		}
@@ -275,14 +363,17 @@ func TestDashboardInteractionStateMatrix(t *testing.T) {
 		t.Fatalf("theme cancellation did not restore %q: %#v", original, model.theme)
 	}
 
-	batch := probeBatchMsg{
+	var cmd tea.Cmd
+	for _, result := range []reachabilityResult{
 		{Target: "alice@one", Status: reachOnline, Latency: time.Millisecond},
 		{Target: "bob@two", Status: reachRefused},
+		{Target: "carol@three", Status: reachTimeout},
+	} {
+		updated, cmd = model.Update(probeTargetMsg(result))
+		model = updated.(dashboardModel)
 	}
-	updated, cmd := model.Update(batch)
-	model = updated.(dashboardModel)
 	if model.probing || cmd == nil || model.hosts[0].Reachability.Status != reachOnline || model.hosts[1].Reachability.Status != reachRefused {
-		t.Fatalf("probe batch was not applied: %#v cmd=%v", model.hosts, cmd)
+		t.Fatalf("streamed probes were not applied: %#v cmd=%v", model.hosts, cmd)
 	}
 	updated, cmd = model.Update(probeTickMsg{})
 	model = updated.(dashboardModel)

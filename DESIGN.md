@@ -2,11 +2,11 @@
 
 ## Direction
 
-Nexus is a layered remote-computer workspace, not a flat status table. Its
-visual vocabulary combines a compact navigation rail, state-rich host rows,
-focused information panels, a connected-node view, and a command palette.
-Information appears progressively so the interface remains usable in narrow
-terminals.
+Nexus is a calm, persistent remote-computer workspace, not a flat status table
+or a feature showcase. Its visual vocabulary combines compact host rows, a
+focused selected-host summary, a command palette, and on-demand operational
+overlays. Information appears progressively so the primary connect workflow
+remains obvious at every terminal size.
 
 ## Visual scene
 
@@ -39,17 +39,20 @@ The default `nexus` theme is anchored by:
 
 - Narrow: host picker with compact selected-host context and a one-line action hint.
 - Medium: host list plus stacked details.
-- Wide: action-oriented workspace rail, host workspace, system snapshot, and
-  fleet constellation.
-- `Enter` connects; `/` searches; `Tab` and `h/l` move focus; `Ctrl+K` opens
-  commands; `e` performs lightweight edits; `?` explains the current surface.
+- Wide: two-region host list and selected-host summary. Fleet, themes, saved
+  commands, and deeper actions appear only when requested.
+- `Enter` always connects; `/` searches; `Ctrl+K` opens actions; `i` refreshes
+  system details in the background; `a` explains saved commands; `?` explains
+  the current surface.
 - Selection and focus remain visible without relying on color.
-- The workspace rail names behavior truthfully: Hosts, Fleet map, Actions,
-  Refresh, and Themes. It does not imply routes Nexus does not provide.
 - Reachability is visually encoded as `●` online, `!` refused, `×` unavailable,
   and `◌` checking, so state survives monochrome terminals.
-- The constellation labels other machines as saved peers; connector graphics
-  never claim that Nexus discovered a network or dependency relationship.
+- Fleet is an optional endpoint overview and explicitly describes TCP
+  reachability without implying discovery, authentication, or dependency links.
+- Finite scans update inside the TUI. Terminal-owning actions temporarily
+  suspend the workspace and restore the same selected host when they finish.
+- The footer prioritizes active work, completion, and recovery over static
+  theme or shortcut status.
 
 ## Component character
 
