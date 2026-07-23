@@ -71,11 +71,10 @@ func TestNormalizeHostHistoryDedupesDefaultPort(t *testing.T) {
 }
 
 func TestProfileForHostIgnoresUserAndPort(t *testing.T) {
-	previous := hostDiscoveryProfiles
-	t.Cleanup(func() { hostDiscoveryProfiles = previous })
-	hostDiscoveryProfiles = map[string]discoveryProfile{
-		"example.com": {RsyncStability: true},
-	}
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+	loadedConfig.HostProfiles["example.com"] = discoveryProfile{RsyncStability: true}
 	if !profileForHost("alice@example.com:2222").RsyncStability {
 		t.Fatal("profile lookup did not ignore user and port")
 	}

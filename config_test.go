@@ -94,6 +94,9 @@ func TestProfilesKeepPortSpecificOverrides(t *testing.T) {
 	if got := profileForTarget("alice@example.com").Alias; got != "default" {
 		t.Fatalf("default alias=%q", got)
 	}
+	if got := profileForTarget("bob@example.com:2222").Alias; got != "default" {
+		t.Fatalf("bare-host fallback alias=%q", got)
+	}
 }
 
 func TestCommandsRejectTerminalControlCharacters(t *testing.T) {

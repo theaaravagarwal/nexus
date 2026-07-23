@@ -154,6 +154,7 @@ nexus --port 2200 ssh user@example-host
 | `n` / `d` | Network / storage |
 | `r` | Refresh saved-port reachability |
 | `e` | Open detailed YAML configuration |
+| Wide rail → `Themes` | Preview every theme live; `e` opens YAML to save |
 | `?` | Contextual help |
 | `q` / `esc` | Quit |
 

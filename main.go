@@ -32,9 +32,8 @@ var (
 	hostPattern = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)$`)
 	ansiCSI     = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 
-	hostDiscoveryProfiles = map[string]discoveryProfile{}
-	verboseLogging        bool
-	fullIndexDepth        = defaultFullIndexDepth
+	verboseLogging bool
+	fullIndexDepth = defaultFullIndexDepth
 )
 
 type app struct {
@@ -168,11 +167,10 @@ func (a *app) ensureBootstrap() error {
 		return err
 	}
 	verboseLogging = a.verbose
-	profiles, cfgFullDepth, cfgFZF, err := loadConfigFromYAML(a.configFile)
+	_, cfgFullDepth, cfgFZF, err := loadConfigFromYAML(a.configFile)
 	if err != nil {
 		return err
 	}
-	hostDiscoveryProfiles = profiles
 	fullIndexDepth = cfgFullDepth
 	fzfUIConfig = cfgFZF
 
@@ -1975,18 +1973,7 @@ func friendlyDiscoveryError(host string, err error) error {
 }
 
 func profileForHost(host string) discoveryProfile {
-	if profile, ok := loadedConfig.HostProfiles[host]; ok {
-		return profile
-	}
-	_, cleanHost := splitUserHost(host)
-	if cleanHost == "" {
-		cleanHost = host
-	}
-	cleanHost = strings.Trim(strings.ToLower(strings.TrimSpace(cleanHost)), "[]")
-	if profile, ok := hostDiscoveryProfiles[cleanHost]; ok {
-		return profile
-	}
-	return discoveryProfile{}
+	return profileForTarget(host)
 }
 
 func logVerbose(format string, args ...any) {

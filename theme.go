@@ -42,6 +42,15 @@ func normalizeThemeName(name string) string {
 	return name
 }
 
+func themeNames() []string {
+	names := make([]string, 0, len(themes))
+	for name := range themes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func activeTheme() theme {
 	name := normalizeThemeName(loadedConfig.UI.Theme)
 	t, ok := themes[name]
@@ -115,12 +124,7 @@ func newThemeCmd() *cobra.Command {
 }
 
 func printThemeList(cmd *cobra.Command, color bool) {
-	names := make([]string, 0, len(themes))
-	for name := range themes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
+	for _, name := range themeNames() {
 		t := themes[name]
 		sample := "focus  live  success  warning  error"
 		if color {

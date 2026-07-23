@@ -20,6 +20,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 ### Changed
 
 - UI themes now apply consistently to the dashboard, help output, and FZF.
+- The dashboard now uses truthful workspace actions, freshness-aware system snapshots, distinct monochrome reachability glyphs, an honest saved-peer constellation, and live in-TUI theme previews.
 - Nexus configuration and state files use private permissions, atomic locked updates, strict YAML fields, and terminal-control sanitization.
 
 ## [0.1.0] - 2026-07-23

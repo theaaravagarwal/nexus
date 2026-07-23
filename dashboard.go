@@ -93,6 +93,10 @@ type dashboardModel struct {
 	commandCursor int
 	commandQuery  string
 	helpOpen      bool
+	themeOpen     bool
+	themeCursor   int
+	themeOriginal theme
+	themePreview  bool
 	showTopology  bool
 	probing       bool
 	plain         bool
@@ -140,6 +144,9 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 		})
 	}
 	model.applyFilter()
+	if len(model.hosts) > 0 && loadedConfig.Reachability.Enabled != nil && *loadedConfig.Reachability.Enabled {
+		model.probing = true
+	}
 	return model
 }
 
@@ -152,7 +159,6 @@ func (m dashboardModel) Init() tea.Cmd {
 	if len(m.hosts) == 0 || loadedConfig.Reachability.Enabled == nil || !*loadedConfig.Reachability.Enabled {
 		return nil
 	}
-	m.probing = true
 	return m.probeCommand()
 }
 
@@ -212,6 +218,26 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "?", "esc", "q", "enter":
 			m.helpOpen = false
+		}
+		return m, nil
+	}
+	if m.themeOpen {
+		names := themeNames()
+		switch key {
+		case "esc", "q":
+			m.theme = m.themeOriginal
+			m.themeOpen = false
+		case "up", "k", "left", "h":
+			m.themeCursor = (m.themeCursor + len(names) - 1) % len(names)
+			m.theme = themes[names[m.themeCursor]]
+		case "down", "j", "right", "l":
+			m.themeCursor = (m.themeCursor + 1) % len(names)
+			m.theme = themes[names[m.themeCursor]]
+		case "enter":
+			m.themeOpen = false
+			m.themePreview = m.theme.Name != activeTheme().Name
+		case "e":
+			return m.choose(actionConfig)
 		}
 		return m, nil
 	}
@@ -349,13 +375,27 @@ func (m dashboardModel) activateNavigation() (tea.Model, tea.Cmd) {
 		m.commandCursor = 0
 		m.commandQuery = ""
 	case 3:
-		m.query = ""
-		m.applyFilter()
-		m.focus = focusHosts
+		if !m.probing && len(m.hosts) > 0 {
+			m.probing = true
+			return m, m.probeCommand()
+		}
 	case 4:
-		return m.choose(actionConfig)
+		m.openThemePreview()
 	}
 	return m, nil
+}
+
+func (m *dashboardModel) openThemePreview() {
+	names := themeNames()
+	m.themeOriginal = m.theme
+	m.themeCursor = 0
+	for index, name := range names {
+		if name == m.theme.Name {
+			m.themeCursor = index
+			break
+		}
+	}
+	m.themeOpen = true
 }
 
 func (m *dashboardModel) moveCursor(delta int) {
@@ -462,10 +502,13 @@ func (m dashboardModel) View() string {
 		return m.shortView()
 	}
 	if m.helpOpen {
-		return m.helpView()
+		return fitTerminalView(m.helpView(), m.width, m.height)
 	}
 	if m.commandOpen {
-		return m.commandPaletteView()
+		return fitTerminalView(m.commandPaletteView(), m.width, m.height)
+	}
+	if m.themeOpen {
+		return fitTerminalView(m.themePreviewView(), m.width, m.height)
 	}
 	s := m.styles()
 	header := m.headerView(s)
@@ -514,7 +557,7 @@ func (m dashboardModel) View() string {
 
 type dashboardStyles struct {
 	title, text, muted, focus, live, success, warning, failure lipgloss.Style
-	panel, selected, selectedMuted                             lipgloss.Style
+	panel, selected, selectedMuted, key                        lipgloss.Style
 }
 
 func (m dashboardModel) styles() dashboardStyles {
@@ -531,6 +574,7 @@ func (m dashboardModel) styles() dashboardStyles {
 			panel:         lipgloss.NewStyle().Border(lipgloss.NormalBorder()),
 			selected:      lipgloss.NewStyle().Bold(true).Reverse(true),
 			selectedMuted: lipgloss.NewStyle().Reverse(true),
+			key:           lipgloss.NewStyle().Bold(true),
 		}
 	}
 	t := m.theme
@@ -556,19 +600,32 @@ func (m dashboardModel) styles() dashboardStyles {
 		panel:         panel,
 		selected:      selected,
 		selectedMuted: selectedMuted,
+		key: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color(t.Focus)).
+			Background(lipgloss.Color(t.Elevated)).
+			Padding(0, 1),
 	}
 }
 
 func (m dashboardModel) headerView(s dashboardStyles) string {
-	status := fmt.Sprintf("%d hosts", len(m.hosts))
-	online := 0
+	online, degraded := 0, 0
 	for _, host := range m.hosts {
-		if host.Reachability.Status == reachOnline {
+		switch host.Reachability.Status {
+		case reachOnline:
 			online++
+		case reachRefused, reachTimeout, reachError:
+			degraded++
 		}
 	}
-	if online > 0 {
-		status += s.live.Render(fmt.Sprintf(" · %d reachable", online))
+	status := fmt.Sprintf("%d saved", len(m.hosts))
+	if m.probing {
+		status += s.muted.Render("  ◌ probing")
+	} else {
+		status += s.live.Render(fmt.Sprintf("  ● %d online", online))
+		if degraded > 0 {
+			status += s.failure.Render(fmt.Sprintf("  × %d unavailable", degraded))
+		}
 	}
 	left := s.title.Render("◆ NEXUS") + s.muted.Render("  remote workspace")
 	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(status)-4)
@@ -578,14 +635,18 @@ func (m dashboardModel) headerView(s dashboardStyles) string {
 }
 
 func (m dashboardModel) navigationView(s dashboardStyles, width, height int) string {
-	items := []string{"⌂ Hosts", "↔ Connections", "›_ Commands", "◷ History", "◈ Themes"}
+	items := []string{"⌂ Hosts", "⌁ Fleet map", "≡ Actions", "↻ Refresh", "◈ Themes"}
+	active := 0
+	if m.focus == focusDetails && m.showTopology {
+		active = 1
+	}
 	var rows []string
 	for i, item := range items {
 		line := "  " + item
 		if i == m.navCursor && m.focus == focusNavigation {
 			line = s.selected.Render("› " + item + strings.Repeat(" ", max(0, width-lipgloss.Width(item)-5)))
-		} else if i == 0 {
-			line = s.focus.Render("› " + item)
+		} else if i == active {
+			line = s.focus.Render("◆ " + item)
 		} else {
 			line = s.muted.Render(line)
 		}
@@ -593,10 +654,10 @@ func (m dashboardModel) navigationView(s dashboardStyles, width, height int) str
 	}
 	rows = append(rows, "", s.muted.Render("STATUS"))
 	rows = append(rows,
-		s.live.Render("● reachable"),
-		s.warning.Render("● refused"),
-		s.failure.Render("● timeout/error"),
-		s.muted.Render("○ checking"),
+		s.live.Render("● online"),
+		s.warning.Render("! refused"),
+		s.failure.Render("× unavailable"),
+		s.muted.Render("◌ checking"),
 	)
 	content := strings.Join(rows, "\n")
 	return s.panel.BorderLeft(false).BorderTop(false).BorderBottom(false).
@@ -617,10 +678,19 @@ func (m dashboardModel) hostListView(s dashboardStyles, width, height int) strin
 	}
 	lines := []string{title, s.muted.Render(truncateText(filter, width-6)), ""}
 	if len(m.hosts) == 0 {
-		lines = append(lines, s.focus.Render("No saved hosts yet."))
-		lines = append(lines, s.muted.Render("Run: nexus host add user@host[:port]"))
+		lines = append(lines,
+			s.focus.Render("◇  NO SAVED ENDPOINTS"),
+			"",
+			s.text.Render("Save an exact SSH destination"),
+			s.muted.Render("including its non-default port."),
+			"",
+			s.key.Render("nexus host add user@host[:port]"),
+		)
 	} else if len(m.filtered) == 0 {
-		lines = append(lines, s.muted.Render("No matching hosts."))
+		lines = append(lines,
+			s.focus.Render("No endpoint matches “"+truncateText(m.query, max(4, width-24))+"”."),
+			s.muted.Render("Backspace to broaden · esc to clear"),
+		)
 	} else {
 		rows := max(1, (height-7)/3)
 		start := 0
@@ -684,11 +754,11 @@ func (m dashboardModel) statusText(s dashboardStyles, result reachabilityResult)
 	case reachOnline:
 		return s.live.Render(fmt.Sprintf("● %dms", max(1, result.Latency.Milliseconds())))
 	case reachRefused:
-		return s.warning.Render("● refused")
+		return s.warning.Render("! refused")
 	case reachTimeout:
-		return s.failure.Render("● timeout")
+		return s.failure.Render("× timeout")
 	case reachError:
-		return s.failure.Render("● error")
+		return s.failure.Render("× error")
 	default:
 		if m.probing {
 			return s.muted.Render("◌ checking")
@@ -712,30 +782,42 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 	lines := []string{
 		s.title.Render(name),
 		s.muted.Render(host.Target),
-		m.statusText(s, host.Reachability),
+		m.statusText(s, host.Reachability) + s.muted.Render("  ·  used "+relativeTime(host.LastUsed, m.now)),
 		"",
-		s.focus.Render("IDENTITY"),
 	}
+	snapshotState := "not scanned · press i"
+	if !host.Updated.IsZero() {
+		snapshotState = "cached " + relativeTime(host.Updated, m.now)
+	}
+	snapshotTitle := "SYSTEM SNAPSHOT"
+	titleGap := max(1, width-lipgloss.Width(snapshotTitle)-lipgloss.Width(snapshotState)-6)
+	lines = append(lines, s.focus.Render(snapshotTitle)+strings.Repeat(" ", titleGap)+s.muted.Render(snapshotState))
 	if host.OS != "" {
 		lines = append(lines, s.text.Render("OS       ")+s.muted.Render(host.OS))
 	} else {
-		lines = append(lines, s.text.Render("OS       ")+s.muted.Render("refresh info with i"))
+		lines = append(lines, s.text.Render("OS       ")+s.muted.Render("unknown"))
 	}
 	lines = append(lines,
 		s.text.Render("CPU      ")+s.muted.Render(valueOr(host.CPU, "unknown")),
 		s.text.Render("Memory   ")+s.muted.Render(valueOr(host.Memory, "unknown")),
 		s.text.Render("Disk     ")+s.muted.Render(valueOr(host.Disk, "unknown")),
-		s.text.Render("Last used ")+s.muted.Render(relativeTime(host.LastUsed, m.now)),
-		s.text.Render("Updated   ")+s.muted.Render(relativeTime(host.Updated, m.now)),
 		s.text.Render("Tags      ")+s.muted.Render(valueOr(strings.Join(host.Tags, ", "), "none")),
 		"",
 		s.focus.Render("TOOLS"),
-		s.muted.Render(valueOr(strings.Join(host.Tools, " · "), "unknown — refresh info with i")),
 	)
+	tools := strings.Join(host.Tools, " · ")
+	if tools == "" {
+		if host.Updated.IsZero() {
+			tools = "not scanned · press i"
+		} else {
+			tools = "none detected"
+		}
+	}
+	lines = append(lines, s.muted.Render(tools))
 	commands := commandsForTarget(host.Target)
-	lines = append(lines, "", s.focus.Render("CUSTOM COMMANDS"))
+	lines = append(lines, "", s.focus.Render("RUNBOOKS"))
 	if len(commands) == 0 {
-		lines = append(lines, s.muted.Render("Configure commands in nexus config"))
+		lines = append(lines, s.muted.Render("none configured · press e to add"))
 	} else {
 		for _, command := range commands {
 			lines = append(lines, s.text.Render(command.Name)+"  "+s.muted.Render(command.Description))
@@ -762,16 +844,16 @@ func (m dashboardModel) workspaceBottomView(s dashboardStyles, width, height int
 	}
 	mapWidth := max(52, width*64/100)
 	actionWidth := max(28, width-mapWidth)
-	mapContent := s.focus.Render("WORKSPACE MAP") + "\n" + m.topologyView(s, mapWidth-6)
+	mapContent := s.focus.Render("FLEET CONSTELLATION") + s.muted.Render("  saved peers, not discovered links") + "\n" + m.topologyView(s, mapWidth-6)
 	mapPanel := s.panel.BorderLeft(false).BorderBottom(false).
 		Width(max(1, mapWidth-1)).Height(max(1, height-1)).Padding(0, 2).Render(mapContent)
 	host := m.selectedHost()
 	actions := []string{
 		s.focus.Render("QUICK ACTIONS"),
 		s.text.Render("enter") + s.muted.Render(" connect"),
-		s.text.Render("c") + s.muted.Render(" commands"),
-		s.text.Render("p / u") + s.muted.Render(" pull / push"),
-		s.text.Render("i") + s.muted.Render(" refresh system info"),
+		s.text.Render("c") + s.muted.Render(" actions"),
+		s.text.Render("p / u") + s.muted.Render(" transfer"),
+		s.text.Render("i") + s.muted.Render(" refresh snapshot"),
 	}
 	if len(commandsForTarget(host.Target)) > 0 {
 		actions = append(actions, s.text.Render("custom")+"  "+s.muted.Render("available in palette"))
@@ -783,28 +865,46 @@ func (m dashboardModel) workspaceBottomView(s dashboardStyles, width, height int
 
 func (m dashboardModel) topologyView(s dashboardStyles, width int) string {
 	host := m.selectedHost()
-	center := truncateText(displayName(host), 12)
+	center := truncateText(displayName(host), 16)
+	centerStatus := plainReachability(host.Reachability, m.probing)
+	const innerWidth = 30
+	const indent = "          "
+	focusLabel := " FOCUS "
+	focusLine := padCell(" "+center+"  "+truncateText(centerStatus, 9), innerWidth)
 	lines := []string{
-		s.muted.Render("       ┌──────────────┐"),
-		s.live.Render(fmt.Sprintf("       │ %-12s │", center)),
-		s.muted.Render("       └──────┬───────┘"),
-		s.muted.Render("  ┌───────────┼───────────┐"),
+		s.muted.Render(indent + "╭" + focusLabel + strings.Repeat("─", innerWidth-lipgloss.Width(focusLabel)) + "╮"),
+		s.focus.Render(indent + "│" + focusLine + "│"),
+		s.muted.Render(indent + "╰──────────────┬───────────────╯"),
+		s.muted.Render("                  SAVED PEERS"),
 	}
-	var names []string
+	var peers []string
 	for _, candidate := range m.hosts {
 		if candidate.Target == host.Target {
 			continue
 		}
-		names = append(names, truncateText(displayName(candidate), 10))
-		if len(names) == 3 {
+		peers = append(peers, fmt.Sprintf("%s %-9s", reachabilityGlyph(candidate.Reachability.Status), truncateText(displayName(candidate), 9)))
+		if len(peers) == 3 {
 			break
 		}
 	}
-	for len(names) < 3 {
-		names = append(names, "·")
+	for len(peers) < 3 {
+		peers = append(peers, "○ ·")
 	}
-	lines = append(lines, fmt.Sprintf("  %-10s  %-10s  %-10s", names[0], names[1], names[2]))
+	lines = append(lines, fmt.Sprintf("     %-12s    %-12s    %-12s", peers[0], peers[1], peers[2]))
 	return strings.Join(lines, "\n")
+}
+
+func reachabilityGlyph(status reachabilityStatus) string {
+	switch status {
+	case reachOnline:
+		return "●"
+	case reachRefused:
+		return "!"
+	case reachTimeout, reachError:
+		return "×"
+	default:
+		return "○"
+	}
 }
 
 func (m dashboardModel) compactView(s dashboardStyles, width, height int) string {
@@ -821,13 +921,25 @@ func (m dashboardModel) compactView(s dashboardStyles, width, height int) string
 }
 
 func (m dashboardModel) footerView(s dashboardStyles) string {
-	hints := "enter connect   / search   ctrl+k commands   tab focus   ? help   q quit"
+	hints := strings.Join([]string{
+		keyHint(s, "enter", "connect"),
+		keyHint(s, "/", "find"),
+		keyHint(s, "ctrl+k", "actions"),
+		keyHint(s, "?", "help"),
+	}, "  ")
 	if m.width < 72 {
-		hints = "enter connect   / search   c commands   ? help"
+		hints = strings.Join([]string{
+			keyHint(s, "enter", "connect"),
+			keyHint(s, "/", "find"),
+			keyHint(s, "c", "actions"),
+		}, " ")
 	}
 	right := "theme: " + m.theme.Name
+	if m.themePreview {
+		right = "preview: " + m.theme.Name + " · press e to save"
+	}
 	if m.probing {
-		right = "checking saved ports…"
+		right = "◌ checking saved ports"
 	}
 	gap := max(1, m.width-lipgloss.Width(hints)-lipgloss.Width(right)-4)
 	return s.panel.BorderBottom(false).BorderLeft(false).BorderRight(false).
@@ -835,26 +947,36 @@ func (m dashboardModel) footerView(s dashboardStyles) string {
 		Render(s.muted.Render(hints) + strings.Repeat(" ", gap) + s.focus.Render(right))
 }
 
+func keyHint(s dashboardStyles, key, label string) string {
+	return s.key.Render("["+key+"]") + s.muted.Render(" "+label)
+}
+
 func (m dashboardModel) commandPaletteView() string {
 	s := m.styles()
 	commands := m.filteredCommands()
 	width := min(max(38, m.width-12), 74)
-	height := min(max(8, len(commands)+5), max(8, m.height-4))
 	search := "/ " + m.commandQuery
 	if m.commandQuery == "" {
 		search = "/ filter actions"
 	} else {
 		search += "█"
 	}
-	lines := []string{s.focus.Render("COMMAND PALETTE"), s.muted.Render("actions for " + valueOr(displayName(m.selectedHost()), "Nexus")), s.text.Render(search), ""}
+	context := valueOr(displayName(m.selectedHost()), "Nexus")
+	if target := m.selectedTarget(); target != "" {
+		context += "  ·  " + target
+	}
+	lines := []string{s.focus.Render("ACTIONS"), s.muted.Render(truncateText(context, width-6)), s.text.Render(search), ""}
 	start := 0
-	maxRows := max(1, height-5)
+	maxRows := max(1, m.height-10)
 	if m.commandCursor >= maxRows {
 		start = m.commandCursor - maxRows + 1
 	}
 	end := min(len(commands), start+maxRows)
 	if len(commands) == 0 {
-		lines = append(lines, s.muted.Render("No matching actions."))
+		lines = append(lines,
+			s.text.Render("No action matches “"+truncateText(m.commandQuery, max(4, width-28))+"”."),
+			s.muted.Render("Backspace to broaden the search."),
+		)
 	}
 	for i := start; i < end; i++ {
 		command := commands[i]
@@ -866,13 +988,73 @@ func (m dashboardModel) commandPaletteView() string {
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "", s.muted.Render("enter run   esc close"))
-	panel := s.panel.Width(width-4).Height(height-2).Padding(1, 2).Render(strings.Join(lines, "\n"))
+	lines = append(lines, "", s.muted.Render("[enter] choose   [esc] close   custom runbooks confirm"))
+	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
+}
+
+func (m dashboardModel) themePreviewView() string {
+	s := m.styles()
+	names := themeNames()
+	width := min(max(46, m.width-16), 72)
+	lines := []string{
+		s.focus.Render("THEME PREVIEW"),
+		s.muted.Render("Live preview across every semantic role"),
+		"",
+	}
+	for index, name := range names {
+		t := themes[name]
+		swatch := themeSwatch(t, m.plain)
+		line := fmt.Sprintf("%-12s %s", name, swatch)
+		if index == m.themeCursor {
+			line = s.selected.Render("› " + padCell(line, width-6))
+		} else {
+			line = "  " + line
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines,
+		"",
+		s.live.Render("● online")+"  "+s.warning.Render("! refused")+"  "+s.failure.Render("× unavailable")+"  "+s.focus.Render("◆ focus"),
+		"",
+		s.muted.Render("[↑↓] preview   [enter] use this session"),
+		s.muted.Render("[e] edit config to save   [esc] restore"),
+	)
+	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+}
+
+func themeSwatch(t theme, plain bool) string {
+	roles := []string{t.Focus, t.Live, t.Success, t.Warning, t.Error}
+	var blocks []string
+	for _, color := range roles {
+		if plain {
+			blocks = append(blocks, "◆")
+			continue
+		}
+		blocks = append(blocks, lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render("◆"))
+	}
+	return strings.Join(blocks, " ")
 }
 
 func (m dashboardModel) helpView() string {
 	s := m.styles()
+	if m.height < 22 {
+		compact := []string{
+			s.focus.Render("NEXUS KEYS"),
+			"",
+			"enter  connect      /  find",
+			"j/k    move         c  actions",
+			"p/u    transfer     i  refresh info",
+			"r      probe        t  fleet map",
+			"e      config       ?  this help",
+			"",
+			"● online  ! refused  × unavailable",
+			s.muted.Render("esc close"),
+		}
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			s.panel.Padding(1, 2).Render(strings.Join(compact, "\n")))
+	}
 	help := []string{
 		s.focus.Render("NEXUS KEYS"),
 		"",
@@ -885,9 +1067,12 @@ func (m dashboardModel) helpView() string {
 		"p / u        pull / push",
 		"i / n / d    info / network / storage",
 		"r            refresh saved-port reachability",
-		"t            toggle workspace map",
+		"t            toggle fleet constellation",
+		"rail Themes  preview themes without leaving Nexus",
 		"e            edit YAML configuration",
 		"? / esc      close help",
+		"",
+		"● online   ! refused   × unavailable   ◌ checking",
 	}
 	panel := s.panel.Padding(1, 2).Render(strings.Join(help, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
@@ -915,7 +1100,7 @@ func (m dashboardModel) shortView() string {
 		if position == m.cursor {
 			prefix = "› "
 		}
-		line := prefix + displayName(host) + "  " + host.Target + "  " + plainReachability(host.Reachability)
+		line := prefix + displayName(host) + "  " + host.Target + "  " + plainReachability(host.Reachability, m.probing)
 		lines = append(lines, s.text.Render(truncateText(line, m.width)))
 	}
 	for len(lines) < m.height-1 {
@@ -939,17 +1124,20 @@ func fitTerminalView(view string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-func plainReachability(result reachabilityResult) string {
+func plainReachability(result reachabilityResult, probing bool) string {
 	switch result.Status {
 	case reachOnline:
 		return fmt.Sprintf("● %dms", max(1, result.Latency.Milliseconds()))
 	case reachRefused:
-		return "● refused"
+		return "! refused"
 	case reachTimeout:
-		return "● timeout"
+		return "× timeout"
 	case reachError:
-		return "● error"
+		return "× error"
 	default:
+		if probing {
+			return "◌ checking"
+		}
 		return "○ unknown"
 	}
 }

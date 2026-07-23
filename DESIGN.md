@@ -39,10 +39,17 @@ The default `nexus` theme is anchored by:
 
 - Narrow: host picker with compact selected-host context and a one-line action hint.
 - Medium: host list plus stacked details.
-- Wide: navigation rail, host workspace, detail/tool panels, and connected-node view.
+- Wide: action-oriented workspace rail, host workspace, system snapshot, and
+  fleet constellation.
 - `Enter` connects; `/` searches; `Tab` and `h/l` move focus; `Ctrl+K` opens
   commands; `e` performs lightweight edits; `?` explains the current surface.
 - Selection and focus remain visible without relying on color.
+- The workspace rail names behavior truthfully: Hosts, Fleet map, Actions,
+  Refresh, and Themes. It does not imply routes Nexus does not provide.
+- Reachability is visually encoded as `●` online, `!` refused, `×` unavailable,
+  and `◌` checking, so state survives monochrome terminals.
+- The constellation labels other machines as saved peers; connector graphics
+  never claim that Nexus discovered a network or dependency relationship.
 
 ## Component character
 
@@ -56,5 +63,5 @@ state without moving the user's current selection.
 Built-in themes share identical semantic roles and component behavior. YAML
 selects a named theme and opaque or transparent background; advanced users can
 override semantic colors. Theme choice applies consistently to the TUI, help,
-and FZF.
-
+and FZF. The TUI can preview themes live without saving; detailed persistence
+remains an explicit YAML edit.

@@ -42,16 +42,46 @@ func TestDashboardNavigationAndCommandFilter(t *testing.T) {
 	}
 }
 
+func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.focus = focusNavigation
+	model.navCursor = 4
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if cmd != nil || !model.themeOpen {
+		t.Fatalf("theme preview did not open in TUI: cmd=%v model=%#v", cmd, model)
+	}
+	before := model.theme.Name
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(dashboardModel)
+	if model.theme.Name == before {
+		t.Fatal("theme preview did not advance")
+	}
+	view := model.View()
+	for _, want := range []string{"THEME PREVIEW", "use this session", "edit config to save"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("theme preview missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestDashboardStartsInCheckingState(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	if !model.probing || !strings.Contains(model.View(), "checking") {
+		t.Fatalf("initial probe state is not visible:\n%s", model.View())
+	}
+}
+
 func TestDashboardTopologyToggleChangesWideWorkspace(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.width, model.height = 120, 30
-	if view := model.View(); !strings.Contains(view, "WORKSPACE MAP") {
+	if view := model.View(); !strings.Contains(view, "FLEET CONSTELLATION") {
 		t.Fatalf("initial view missing topology:\n%s", view)
 	}
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	model = updated.(dashboardModel)
 	view := model.View()
-	if strings.Contains(view, "WORKSPACE MAP") || !strings.Contains(view, "show map") {
+	if strings.Contains(view, "FLEET CONSTELLATION") || !strings.Contains(view, "show map") {
 		t.Fatalf("topology toggle had no visible effect:\n%s", view)
 	}
 }
@@ -73,7 +103,7 @@ func TestDashboardViewsRemainInformativeAcrossWidths(t *testing.T) {
 			}
 		}
 		if width == 120 {
-			for _, want := range []string{"WORKSPACE MAP", "QUICK ACTIONS", "CPU", "TOOLS"} {
+			for _, want := range []string{"FLEET CONSTELLATION", "QUICK ACTIONS", "SYSTEM SNAPSHOT", "TOOLS"} {
 				if !strings.Contains(view, want) {
 					t.Fatalf("wide layout missing %q:\n%s", want, view)
 				}
@@ -105,6 +135,37 @@ func TestDashboardRenderStaysWithinTerminalBounds(t *testing.T) {
 					t.Fatalf("plain=%v size=%v line=%d width=%d\n%s", plain, size, index, width, view)
 				}
 			}
+		}
+	}
+}
+
+func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
+	for _, size := range [][2]int{{40, 16}, {72, 20}, {120, 32}} {
+		for _, overlay := range []string{"help", "commands", "themes"} {
+			model := newDashboardModel([]string{"alice@one"})
+			model.width, model.height = size[0], size[1]
+			switch overlay {
+			case "help":
+				model.helpOpen = true
+			case "commands":
+				model.commandOpen = true
+			case "themes":
+				model.openThemePreview()
+			}
+			assertTerminalBounds(t, model.View(), size[0], size[1], overlay)
+		}
+	}
+}
+
+func assertTerminalBounds(t *testing.T, view string, width, height int, label string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+	if len(lines) > height {
+		t.Fatalf("%s size=%dx%d height=%d\n%s", label, width, height, len(lines), view)
+	}
+	for index, line := range lines {
+		if got := lipgloss.Width(line); got > width {
+			t.Fatalf("%s size=%dx%d line=%d width=%d\n%s", label, width, height, index, got, view)
 		}
 	}
 }

@@ -296,10 +296,22 @@ func profileForTarget(target string) discoveryProfile {
 		return profile
 	}
 	spec, err := parseConnectionTarget(target)
-	if err == nil {
-		for key, profile := range loadedConfig.HostProfiles {
-			if profileLookupKey(key) == strings.ToLower(spec.Host) {
-				return profile
+	if err != nil {
+		return discoveryProfile{}
+	}
+	candidates := []string{
+		connectionTarget{User: spec.User, Host: spec.Host, Port: defaultSSHPort}.String(),
+		spec.Host,
+	}
+	keys := make([]string, 0, len(loadedConfig.HostProfiles))
+	for key := range loadedConfig.HostProfiles {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, candidate := range candidates {
+		for _, key := range keys {
+			if strings.EqualFold(strings.TrimSpace(key), candidate) {
+				return loadedConfig.HostProfiles[key]
 			}
 		}
 	}
