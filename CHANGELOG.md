@@ -4,7 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project follows Semantic Versioning.
 
-## [Unreleased]
+## [0.1.1] - 2026-07-23
+
+### Added
+
+- Rich constellation-workbench TUI with navigation, host dossiers, workspace map, command palette, responsive layouts, and contextual help.
+- Zoxide-style host frecency ordering based on successful use and recency.
+- Saved-port TCP reachability and latency checks that never authenticate in the background.
+- Cached remote OS, CPU, memory, disk, and supported-tool summaries refreshed through explicit system-info actions.
+- Built-in Nexus, Nord, Dracula, Catppuccin, Gruvbox, monochrome, and terminal themes.
+- Theme previews and configuration inspection commands.
+- Global, tag-inherited, and per-host custom remote commands with mandatory exact-command confirmation.
+- Host aliases, tags, OS labels, and commands in YAML configuration.
+
+### Changed
+
+- UI themes now apply consistently to the dashboard, help output, and FZF.
+- Nexus configuration and state files use private permissions, atomic locked updates, strict YAML fields, and terminal-control sanitization.
 
 ## [0.1.0] - 2026-07-23
 

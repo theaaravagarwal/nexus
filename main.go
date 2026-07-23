@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 const connectTimeoutSeconds = "5"
@@ -38,15 +37,11 @@ var (
 	fullIndexDepth        = defaultFullIndexDepth
 )
 
-type discoveryProfile struct {
-	UseUnixDiscovery bool `yaml:"use_unix_discovery"`
-	RsyncStability   bool `yaml:"rsync_stability"`
-}
-
 type app struct {
 	configDir   string
 	configFile  string
 	hostsFile   string
+	stateFile   string
 	dryRun      bool
 	verbose     bool
 	sshPort     int
@@ -64,6 +59,7 @@ func newApp() (*app, error) {
 		configDir:  configDir,
 		configFile: filepath.Join(configDir, "config.yaml"),
 		hostsFile:  filepath.Join(configDir, "hosts.json"),
+		stateFile:  filepath.Join(configDir, "state.json"),
 	}, nil
 }
 
@@ -113,10 +109,12 @@ func (a *app) newRootCmd() *cobra.Command {
 	root.AddCommand(a.newNetCmd())
 	root.AddCommand(a.newInfoCmd())
 	root.AddCommand(a.newStorageCmd())
+	root.AddCommand(a.newRunCmd())
 	root.AddCommand(a.newPullCmd())
 	root.AddCommand(a.newPushCmd())
 	root.AddCommand(a.newHostCmd())
 	root.AddCommand(a.newConfigCmd())
+	root.AddCommand(newThemeCmd())
 	root.AddCommand(a.newDoctorCmd())
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(&cobra.Command{
@@ -132,7 +130,7 @@ func (a *app) newRootCmd() *cobra.Command {
 		},
 	})
 	root.AddCommand(newCompletionCmd(root))
-	installHelp(root)
+	installHelp(root, a)
 
 	return root
 }
@@ -142,7 +140,7 @@ func (a *app) ensureBootstrap() error {
 		return errors.New("internal error: app is nil")
 	}
 
-	if err := os.MkdirAll(a.configDir, 0o755); err != nil {
+	if err := os.MkdirAll(a.configDir, 0o700); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %w", a.configDir, err)
 	}
 
@@ -151,14 +149,18 @@ func (a *app) ensureBootstrap() error {
 		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("failed to check hosts file %s: %w", a.hostsFile, err)
 		}
-		if err := os.WriteFile(a.hostsFile, []byte("[]\n"), 0o644); err != nil {
+		if err := os.WriteFile(a.hostsFile, []byte("[]\n"), 0o600); err != nil {
 			return err
 		}
 	} else if info.IsDir() {
 		return fmt.Errorf("hosts file path is a directory: %s", a.hostsFile)
 	} else if info.Size() == 0 {
-		if err := os.WriteFile(a.hostsFile, []byte("[]\n"), 0o644); err != nil {
+		if err := os.WriteFile(a.hostsFile, []byte("[]\n"), 0o600); err != nil {
 			return err
+		}
+	} else if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(a.hostsFile, 0o600); err != nil {
+			return fmt.Errorf("failed to protect hosts file: %w", err)
 		}
 	}
 
@@ -218,32 +220,66 @@ func (a *app) writeHosts(hosts []string) error {
 	}
 	encoded = append(encoded, '\n')
 
-	if err := os.WriteFile(a.hostsFile, encoded, 0o644); err != nil {
+	if err := atomicWritePrivate(a.hostsFile, encoded); err != nil {
 		return fmt.Errorf("failed to write hosts file: %w", err)
 	}
 	return nil
 }
 
 func (a *app) newConfigCmd() *cobra.Command {
-	return &cobra.Command{
+	configCmd := &cobra.Command{
 		Use:   "config",
-		Short: "Open ~/.config/nexus/config.yaml in your editor",
+		Short: "View or edit ~/.config/nexus/config.yaml",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := ensureConfigFile(a.configFile); err != nil {
-				return err
-			}
-
-			editorCmd, editorArgs, err := resolveEditorCommand()
+			return a.editConfig()
+		},
+	}
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "edit",
+		Short: "Open the YAML configuration in your editor",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.editConfig()
+		},
+	})
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Print the current YAML configuration",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			raw, err := os.ReadFile(a.configFile)
 			if err != nil {
 				return err
 			}
-			proc := exec.Command(editorCmd, append(editorArgs, a.configFile)...)
-			proc.Stdin = os.Stdin
-			proc.Stdout = os.Stdout
-			proc.Stderr = os.Stderr
-			return proc.Run()
+			_, err = cmd.OutOrStdout().Write(raw)
+			return err
 		},
+	})
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "path",
+		Short: "Print the configuration file path",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), a.configFile)
+		},
+	})
+	return configCmd
+}
+
+func (a *app) editConfig() error {
+	if err := ensureConfigFile(a.configFile); err != nil {
+		return err
 	}
+	editorCmd, editorArgs, err := resolveEditorCommand()
+	if err != nil {
+		return err
+	}
+	proc := exec.Command(editorCmd, append(editorArgs, a.configFile)...)
+	proc.Stdin = os.Stdin
+	proc.Stdout = os.Stdout
+	proc.Stderr = os.Stderr
+	return proc.Run()
 }
 
 func resolveEditorCommand() (string, []string, error) {
@@ -327,80 +363,6 @@ func parseShellAssignment(line, key string) (string, bool) {
 	return strings.TrimSpace(value), value != ""
 }
 
-func ensureConfigFile(configPath string) error {
-	if configPath == "" {
-		return errors.New("config path is empty")
-	}
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-	info, err := os.Stat(configPath)
-	if err == nil {
-		if info.IsDir() {
-			return fmt.Errorf("config path is a directory: %s", configPath)
-		}
-		return nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to inspect config file: %w", err)
-	}
-	return os.WriteFile(configPath, []byte(defaultConfigYAML()), 0o644)
-}
-
-func defaultConfigYAML() string {
-	return "# NEXUS settings\n" +
-		"# Maximum recursion depth when --indexing full is used.\n" +
-		"full_index_depth: 5\n\n" +
-		"# Interactive picker styling: dark, light, or cyberpunk.\n" +
-		"fzf:\n" +
-		"  theme: dark\n" +
-		"  layout: reverse\n" +
-		"  prompt: \"Nexus ❯ \"\n" +
-		"  pointer: \"→\"\n\n" +
-		"# Optional per-host overrides.\n" +
-		"# Keys must match the host part of your saved user@host entries.\n" +
-		"# Example: if you add \"alice@server.local\", use \"server.local\" as the key.\n" +
-		"host_profiles:\n" +
-		"  <host-or-ip>:\n" +
-		"    # Force Unix command style on remote discovery for this host.\n" +
-		"    use_unix_discovery: true\n" +
-		"    # Use conservative rsync args for flaky/mixed environments.\n" +
-		"    rsync_stability: true\n"
-}
-
-func loadConfigFromYAML(configPath string) (map[string]discoveryProfile, int, fzfConfig, error) {
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, defaultFullIndexDepth, defaultFZFConfig(), fmt.Errorf("failed to read config file %s: %w", configPath, err)
-	}
-
-	var parsed struct {
-		HostProfiles   map[string]discoveryProfile `yaml:"host_profiles"`
-		FullIndexDepth int                         `yaml:"full_index_depth"`
-		FZF            fzfConfig                   `yaml:"fzf"`
-	}
-	if err := yaml.Unmarshal(raw, &parsed); err != nil {
-		return nil, defaultFullIndexDepth, defaultFZFConfig(), fmt.Errorf("invalid config YAML %s: %w", configPath, err)
-	}
-
-	profiles := make(map[string]discoveryProfile, len(parsed.HostProfiles))
-	for host, profile := range parsed.HostProfiles {
-		key := strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
-		if key == "" {
-			continue
-		}
-		profiles[key] = profile
-	}
-	return profiles, sanitizeFullIndexDepth(parsed.FullIndexDepth), sanitizeFZFConfig(parsed.FZF), nil
-}
-
-func sanitizeFullIndexDepth(raw int) int {
-	if raw <= 0 {
-		return defaultFullIndexDepth
-	}
-	return raw
-}
-
 func (a *app) appendHostIfNew(host string) (bool, error) {
 	target, err := canonicalConnectionTarget(host, a.sshPort)
 	if err != nil {
@@ -458,6 +420,9 @@ func (a *app) newSSHCmd() *cobra.Command {
 
 			if err := runInteractiveSSH(host); err != nil {
 				return fmt.Errorf("connection failed: %w", err)
+			}
+			if err := a.recordSuccess(host); err != nil {
+				logVerbose("failed to record host activity: %v", err)
 			}
 			return nil
 		},
@@ -556,6 +521,11 @@ func (a *app) newPullCmd() *cobra.Command {
 			}
 
 			maybeOpenMedia(remoteSource)
+			if !a.dryRun {
+				if err := a.recordSuccess(host); err != nil {
+					logVerbose("failed to record host activity: %v", err)
+				}
+			}
 			return nil
 		},
 	}
@@ -660,9 +630,21 @@ func (a *app) newPushCmd() *cobra.Command {
 			}); err != nil {
 				return err
 			}
+			if !a.dryRun {
+				if err := a.recordSuccess(host); err != nil {
+					logVerbose("failed to record host activity: %v", err)
+				}
+			}
 			return nil
 		},
 	}
+}
+
+func (a *app) recordSuccess(target string) error {
+	if a == nil || a.stateFile == "" {
+		return nil
+	}
+	return recordHostSuccess(a.stateFile, target, time.Now())
 }
 
 func (a *app) resolveHostForTransfer(arg string) (string, error) {
@@ -1993,6 +1975,9 @@ func friendlyDiscoveryError(host string, err error) error {
 }
 
 func profileForHost(host string) discoveryProfile {
+	if profile, ok := loadedConfig.HostProfiles[host]; ok {
+		return profile
+	}
 	_, cleanHost := splitUserHost(host)
 	if cleanHost == "" {
 		cleanHost = host

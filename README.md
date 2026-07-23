@@ -11,6 +11,11 @@ CLI for SSH sessions and remote file sync workflows.
 - Pull and push files/directories over `rsync` with interactive path selection.
 - Inspect remote CPU, memory, network, and storage with portable command fallbacks.
 - Host history persisted in `~/.config/nexus/hosts.json`.
+- Zoxide-style frecency ordering puts frequently and recently used hosts first.
+- Saved-port reachability and TCP latency without background SSH authentication.
+- Rich responsive workspace with host dossiers, topology, command palette, and contextual help.
+- Seven built-in themes plus semantic color overrides in YAML.
+- Confirmed custom commands inherited globally, by tag, or per host.
 - Remote indexing modes:
   - `lazy` (default): shallow listing for faster navigation.
   - `full`: deeper recursive listing (depth controlled via config).
@@ -45,7 +50,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Choose a different install directory or version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/theaaravagarwal/nexus/main/install.sh | NEXUS_INSTALL_DIR=/usr/local/bin NEXUS_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/theaaravagarwal/nexus/main/install.sh | NEXUS_INSTALL_DIR=/usr/local/bin NEXUS_VERSION=v0.1.1 sh
 ```
 
 The installer detects macOS/Linux and ARM64/x86-64, verifies the release checksum, and does not require `sudo` for the default location.
@@ -105,6 +110,7 @@ Commands:
 - `net [user@host[:port]]`
 - `info [user@host[:port]]`
 - `storage [user@host[:port]]`
+- `run [command] [user@host[:port]]`
 - `host list`
 - `host add [user@host[:port]]`
 - `host remove [user@host[:port]]`
@@ -140,9 +146,15 @@ nexus --port 2200 ssh user@example-host
 | `j` / `k` or arrows | Select a host |
 | `/` or `f` | Filter hosts |
 | `enter` / `s` | SSH |
+| `tab`, `h` / `l` | Move workspace focus |
+| `ctrl+k` / `c` | Open command palette |
+| `g` / `G`, `pgup` / `pgdown` | Jump through large histories |
 | `p` / `u` | Pull / push |
-| `t` / `i` | Top / system info |
+| `t` / `i` | Toggle topology / system info |
 | `n` / `d` | Network / storage |
+| `r` | Refresh saved-port reachability |
+| `e` | Open detailed YAML configuration |
+| `?` | Contextual help |
 | `q` / `esc` | Quit |
 
 ## Configuration
@@ -155,25 +167,43 @@ On first run, nexus bootstraps:
 Default config template:
 
 ```yaml
-# NEXUS settings
-# Maximum recursion depth when --indexing full is used.
 full_index_depth: 5
 
-# Optional fuzzy-picker styling.
+ui:
+  # nexus | nord | dracula | catppuccin | gruvbox | mono | terminal
+  theme: nexus
+  # opaque paints the theme background; transparent preserves your terminal.
+  background: opaque
+
+reachability:
+  # DNS/TCP checks only; no background authentication.
+  enabled: true
+  timeout_ms: 1500
+  concurrency: 8
+  cache_seconds: 30
+
 fzf:
-  theme: dark
   layout: reverse
   prompt: "Nexus ❯ "
   pointer: "→"
 
-# Optional per-host overrides.
-# Keys must match the host part of your saved user@host entries.
-# Example: if you add "alice@server.local", use "server.local" as the key.
+# Available for every host. Nexus always previews and confirms custom commands.
+commands: []
+
+# Inherited by hosts with matching tags.
+tag_commands: {}
+
+# Full saved targets are recommended; legacy host/IP keys still work.
 host_profiles:
-  <host-or-ip>:
-    # Force Unix command style on remote discovery for this host.
+  alice@server.local:2222:
+    alias: production
+    tags: [prod, web]
+    os: Ubuntu
+    commands:
+      - name: logs
+        description: Follow application logs
+        command: journalctl -u app -f
     use_unix_discovery: true
-    # Use conservative rsync args for flaky/mixed environments.
     rsync_stability: true
 ```
 
@@ -181,15 +211,30 @@ How to use the config:
 
 1. Add hosts with `nexus host add user@host`.
 2. Open the config with `nexus config`.
-3. Under `host_profiles`, add one entry per remote using only the host/IP part (not `user@`).
-4. Save and run `nexus pull`/`nexus push`; overrides are applied automatically for matching hosts.
+3. Under `host_profiles`, use the full saved target when profiles differ by user or port.
+4. Save and reopen Nexus; aliases, tags, commands, and themes apply automatically.
+
+Useful configuration commands:
+
+```bash
+nexus config          # edit YAML
+nexus config show     # print source YAML
+nexus config path     # print its path
+nexus theme preview   # preview every built-in theme
+```
 
 Config keys:
 
 - `full_index_depth`: max depth used in `--indexing full` mode.
-- `fzf.theme`: `dark`, `light`, or `cyberpunk`.
+- `ui.theme`: `nexus`, `nord`, `dracula`, `catppuccin`, `gruvbox`, `mono`, or `terminal`.
+- `ui.background`: `opaque` or `transparent`.
+- `ui.colors`: optional semantic overrides such as `focus` and `live`.
+- `reachability.*`: bounds saved-target DNS/TCP checks; these are not SSH/login latency checks.
 - `fzf.layout`: `default`, `reverse`, or `reverse-list`.
 - `fzf.prompt` / `fzf.pointer`: picker text and selection marker.
+- `commands`: global confirmed remote commands.
+- `tag_commands.<tag>`: commands inherited by matching host tags.
+- `host_profiles.<target>.alias` / `tags` / `os` / `commands`: TUI metadata and per-host commands.
 - `host_profiles.<host>.use_unix_discovery`: force Unix-style discovery commands for that host.
 - `host_profiles.<host>.rsync_stability`: enables conservative `rsync` profile for reliability on mixed environments.
 
@@ -205,6 +250,11 @@ Config keys:
 - `main.go`: active CLI entrypoint and command wiring.
 - `connection.go`: validated target parsing and canonical history identities.
 - `dashboard.go`: Bubble Tea host/action dashboard.
+- `config.go`: private YAML configuration, profiles, command inheritance, and sanitization.
+- `theme.go`: semantic built-in themes shared across terminal surfaces.
+- `state.go`: atomic frecency and remote-summary state persistence.
+- `probes.go`: bounded saved-port DNS/TCP reachability checks.
+- `metadata.go`: explicit non-interactive remote system-summary cache refresh.
 - `diagnostics.go`: portable remote inspection command selection.
 - `help.go`: adaptive colored help renderer.
 - `performance.go`: SSH multiplexing and rsync capability detection.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 
@@ -71,7 +72,17 @@ func (a *app) newDoctorCmd() *cobra.Command {
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-8s %s\n", binary, status)
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "config   %s\nhistory  %s\n", a.configFile, a.hostsFile)
+			configMode := "unknown"
+			if info, err := os.Stat(a.configFile); err == nil {
+				configMode = info.Mode().Perm().String()
+			}
+			stateStatus := "ok"
+			if _, err := loadState(a.stateFile); err != nil {
+				stateStatus = "invalid: " + sanitizeTerminalText(err.Error())
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+				"config   %s (%s)\nhistory  %s\nstate    %s (%s)\ntheme    %s\n",
+				a.configFile, configMode, a.hostsFile, a.stateFile, stateStatus, activeTheme().Name)
 			if requiredMissing {
 				return fmt.Errorf("required dependency missing: ssh")
 			}

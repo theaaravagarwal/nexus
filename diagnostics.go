@@ -52,6 +52,12 @@ func (a *app) newInfoCmd() *cobra.Command {
 		}
 		err = runRemoteProbe(host, []string{"fastfetch", "neofetch --off", "screenfetch"}, false)
 		if err == nil {
+			if refreshErr := refreshHostMetadata(a.stateFile, host); refreshErr != nil {
+				logVerbose("metadata cache refresh failed: %v", refreshErr)
+			}
+			if recordErr := a.recordSuccess(host); recordErr != nil {
+				logVerbose("failed to record host activity: %v", recordErr)
+			}
 			return nil
 		}
 		if !errors.Is(err, errNoRemoteProbeCandidates) {
@@ -64,7 +70,16 @@ func (a *app) newInfoCmd() *cobra.Command {
 			`printf '\n%s\n' 'CPU / memory'; (command -v lscpu >/dev/null 2>&1 && lscpu | sed -n 's/^Model name:[[:space:]]*//p') || ` +
 			`(command -v sysctl >/dev/null 2>&1 && sysctl -n machdep.cpu.brand_string 2>/dev/null) || true; ` +
 			`(command -v free >/dev/null 2>&1 && free -h) || (command -v vm_stat >/dev/null 2>&1 && vm_stat) || true`
-		return runRemoteInteractiveCommand(host, summary)
+		if err := runRemoteInteractiveCommand(host, summary); err != nil {
+			return err
+		}
+		if refreshErr := refreshHostMetadata(a.stateFile, host); refreshErr != nil {
+			logVerbose("metadata cache refresh failed: %v", refreshErr)
+		}
+		if recordErr := a.recordSuccess(host); recordErr != nil {
+			logVerbose("failed to record host activity: %v", recordErr)
+		}
+		return nil
 	}
 	return command
 }
@@ -95,6 +110,9 @@ func (a *app) newDiagnosticCommand(use string, aliases []string, short string, c
 			}
 			if err := runRemoteProbe(host, candidates, sudo); err != nil {
 				return fmt.Errorf("%s failed: %w", strings.Fields(use)[0], err)
+			}
+			if err := a.recordSuccess(host); err != nil {
+				logVerbose("failed to record host activity: %v", err)
 			}
 			return nil
 		},
