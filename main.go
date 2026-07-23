@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -15,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +47,9 @@ type app struct {
 	configDir   string
 	configFile  string
 	hostsFile   string
+	dryRun      bool
 	verbose     bool
+	sshPort     int
 	remoteIndex string
 }
 
@@ -83,20 +85,54 @@ func (a *app) newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "nexus",
 		Short:         "History-first SSH and transfer CLI",
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Args:          cobra.NoArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Annotations["skip-bootstrap"] == "true" {
+				return nil
+			}
 			return a.ensureBootstrap()
 		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !isInteractiveTerminal() {
+				return cmd.Help()
+			}
+			return a.runDashboard()
+		},
 	}
+	root.SetVersionTemplate("nexus {{.Version}}\n")
+	root.PersistentFlags().BoolVarP(&a.dryRun, "dry-run", "n", false, "Show transfer command without changing files")
 	root.PersistentFlags().BoolVarP(&a.verbose, "verbose", "v", false, "Enable verbose debug logs")
+	root.PersistentFlags().IntVarP(&a.sshPort, "port", "p", 0, "Override SSH port (1-65535)")
 	root.PersistentFlags().StringVarP(&a.remoteIndex, "indexing", "i", "lazy", "Indexing mode: lazy or full")
 
 	root.AddCommand(a.newSSHCmd())
+	root.AddCommand(a.newTopCmd())
+	root.AddCommand(a.newNetCmd())
+	root.AddCommand(a.newInfoCmd())
+	root.AddCommand(a.newStorageCmd())
 	root.AddCommand(a.newPullCmd())
 	root.AddCommand(a.newPushCmd())
 	root.AddCommand(a.newHostCmd())
 	root.AddCommand(a.newConfigCmd())
+	root.AddCommand(a.newDoctorCmd())
+	root.AddCommand(newVersionCmd())
+	root.AddCommand(&cobra.Command{
+		Use:     "tui",
+		Aliases: []string{"ui", "dashboard"},
+		Short:   "Open the interactive host dashboard",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !isInteractiveTerminal() {
+				return errors.New("the dashboard requires an interactive terminal")
+			}
+			return a.runDashboard()
+		},
+	})
+	root.AddCommand(newCompletionCmd(root))
+	installHelp(root)
 
 	return root
 }
@@ -130,12 +166,13 @@ func (a *app) ensureBootstrap() error {
 		return err
 	}
 	verboseLogging = a.verbose
-	profiles, cfgFullDepth, err := loadConfigFromYAML(a.configFile)
+	profiles, cfgFullDepth, cfgFZF, err := loadConfigFromYAML(a.configFile)
 	if err != nil {
 		return err
 	}
 	hostDiscoveryProfiles = profiles
 	fullIndexDepth = cfgFullDepth
+	fzfUIConfig = cfgFZF
 
 	return nil
 }
@@ -157,7 +194,7 @@ func (a *app) readHosts() ([]string, error) {
 
 	var hosts []string
 	if err := json.Unmarshal(raw, &hosts); err == nil {
-		return dedupeKeepOrder(hosts), nil
+		return normalizeHostHistory(hosts), nil
 	}
 
 	var legacy struct {
@@ -166,7 +203,7 @@ func (a *app) readHosts() ([]string, error) {
 	if err := json.Unmarshal(raw, &legacy); err != nil {
 		return nil, fmt.Errorf("invalid hosts.json format: %w", err)
 	}
-	return dedupeKeepOrder(legacy.Hosts), nil
+	return normalizeHostHistory(legacy.Hosts), nil
 }
 
 func (a *app) writeHosts(hosts []string) error {
@@ -314,6 +351,12 @@ func defaultConfigYAML() string {
 	return "# NEXUS settings\n" +
 		"# Maximum recursion depth when --indexing full is used.\n" +
 		"full_index_depth: 5\n\n" +
+		"# Interactive picker styling: dark, light, or cyberpunk.\n" +
+		"fzf:\n" +
+		"  theme: dark\n" +
+		"  layout: reverse\n" +
+		"  prompt: \"Nexus ❯ \"\n" +
+		"  pointer: \"→\"\n\n" +
 		"# Optional per-host overrides.\n" +
 		"# Keys must match the host part of your saved user@host entries.\n" +
 		"# Example: if you add \"alice@server.local\", use \"server.local\" as the key.\n" +
@@ -325,18 +368,19 @@ func defaultConfigYAML() string {
 		"    rsync_stability: true\n"
 }
 
-func loadConfigFromYAML(configPath string) (map[string]discoveryProfile, int, error) {
+func loadConfigFromYAML(configPath string) (map[string]discoveryProfile, int, fzfConfig, error) {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, defaultFullIndexDepth, fmt.Errorf("failed to read config file %s: %w", configPath, err)
+		return nil, defaultFullIndexDepth, defaultFZFConfig(), fmt.Errorf("failed to read config file %s: %w", configPath, err)
 	}
 
 	var parsed struct {
 		HostProfiles   map[string]discoveryProfile `yaml:"host_profiles"`
 		FullIndexDepth int                         `yaml:"full_index_depth"`
+		FZF            fzfConfig                   `yaml:"fzf"`
 	}
 	if err := yaml.Unmarshal(raw, &parsed); err != nil {
-		return nil, defaultFullIndexDepth, fmt.Errorf("invalid config YAML %s: %w", configPath, err)
+		return nil, defaultFullIndexDepth, defaultFZFConfig(), fmt.Errorf("invalid config YAML %s: %w", configPath, err)
 	}
 
 	profiles := make(map[string]discoveryProfile, len(parsed.HostProfiles))
@@ -347,7 +391,7 @@ func loadConfigFromYAML(configPath string) (map[string]discoveryProfile, int, er
 		}
 		profiles[key] = profile
 	}
-	return profiles, sanitizeFullIndexDepth(parsed.FullIndexDepth), nil
+	return profiles, sanitizeFullIndexDepth(parsed.FullIndexDepth), sanitizeFZFConfig(parsed.FZF), nil
 }
 
 func sanitizeFullIndexDepth(raw int) int {
@@ -358,9 +402,11 @@ func sanitizeFullIndexDepth(raw int) int {
 }
 
 func (a *app) appendHostIfNew(host string) (bool, error) {
-	if err := validateUserHost(host); err != nil {
+	target, err := canonicalConnectionTarget(host, a.sshPort)
+	if err != nil {
 		return false, err
 	}
+	host = target.String()
 
 	hosts, err := a.readHosts()
 	if err != nil {
@@ -378,8 +424,8 @@ func (a *app) appendHostIfNew(host string) (bool, error) {
 
 func (a *app) newSSHCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "ssh",
-		Short: "Open SSH session from history or new user@ip",
+		Use:   "ssh [user@host[:port]]",
+		Short: "Open an SSH session from history or a new target",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var (
@@ -400,9 +446,11 @@ func (a *app) newSSHCmd() *cobra.Command {
 				}
 			}
 
-			if err := validateUserHost(host); err != nil {
+			target, err := canonicalConnectionTarget(host, a.sshPort)
+			if err != nil {
 				return fmt.Errorf("invalid host %q: %w", host, err)
 			}
+			host = target.String()
 			if _, err := a.appendHostIfNew(host); err != nil {
 				return fmt.Errorf("failed to save host history: %w", err)
 			}
@@ -418,7 +466,7 @@ func (a *app) newSSHCmd() *cobra.Command {
 
 func (a *app) newPullCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "pull [user@ip] [remote-path] [local-dir]",
+		Use:   "pull [user@host[:port]] [remote-path] [local-dir]",
 		Short: "Pull remote file/folder with rsync",
 		Args:  cobra.MaximumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -493,10 +541,16 @@ func (a *app) newPullCmd() *cobra.Command {
 			localDest = ensureTrailingSlashForMode(localDest, false)
 			localDest = normalizeLocalPathForRsync(localDest)
 
-			source := formatRemoteEndpoint(host, remoteSource, remoteIsWindows)
+			source, err := formatRemoteEndpoint(host, remoteSource, remoteIsWindows)
+			if err != nil {
+				return err
+			}
+			targetSpec, _ := parseConnectionTarget(host)
 			if err := runRsync(source, localDest, rsyncOptions{
 				forceRemoteRsyncPath: remoteIsWindows || stabilityProfile,
 				stabilityProfile:     stabilityProfile,
+				sshPort:              targetSpec.Port,
+				dryRun:               a.dryRun,
 			}); err != nil {
 				return err
 			}
@@ -509,7 +563,7 @@ func (a *app) newPullCmd() *cobra.Command {
 
 func (a *app) newPushCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "push [file] [user@ip] [remote-dir]",
+		Use:   "push [file] [user@host[:port]] [remote-dir]",
 		Short: "Push local file/folder to remote directory with rsync",
 		Args:  cobra.MaximumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -593,10 +647,16 @@ func (a *app) newPushCmd() *cobra.Command {
 
 			source := normalizeLocalPathForRsync(localPath)
 			targetDir := normalizeRemotePathForRsync(remoteDir)
-			target := formatRemoteEndpoint(host, strings.TrimRight(targetDir, "/")+"/", remoteIsWindows)
+			target, err := formatRemoteEndpoint(host, strings.TrimRight(targetDir, "/")+"/", remoteIsWindows)
+			if err != nil {
+				return err
+			}
+			targetSpec, _ := parseConnectionTarget(host)
 			if err := runRsync(source, target, rsyncOptions{
 				forceRemoteRsyncPath: remoteIsWindows || stabilityProfile,
 				stabilityProfile:     stabilityProfile,
+				sshPort:              targetSpec.Port,
+				dryRun:               a.dryRun,
 			}); err != nil {
 				return err
 			}
@@ -615,9 +675,11 @@ func (a *app) resolveHostForTransfer(arg string) (string, error) {
 		}
 	}
 
-	if err := validateUserHost(host); err != nil {
+	target, err := canonicalConnectionTarget(host, a.sshPort)
+	if err != nil {
 		return "", fmt.Errorf("invalid host %q: %w", host, err)
 	}
+	host = target.String()
 	if _, err := a.appendHostIfNew(host); err != nil {
 		return "", fmt.Errorf("failed to save host history: %w", err)
 	}
@@ -656,7 +718,10 @@ func getRemotePathsInternal(user, host, remotePath string, fullIndex bool, actio
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := buildSSHCommand(ctx, target, false, remoteCmd)
+	cmd, err := buildSSHCommand(ctx, target, false, remoteCmd)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid SSH target %q: %w", target, err)
+	}
 	logVerbose("remote discovery command for %s: %s", target, remoteCmd)
 	logVerbose("ssh invocation: %s", formatCommand(cmd.Path, cmd.Args[1:]))
 	stdout, err := cmd.StdoutPipe()
@@ -864,12 +929,16 @@ func defaultRemoteWindowsBase(host string) string {
 }
 
 func splitUserHost(raw string) (string, string) {
-	raw = strings.TrimSpace(raw)
-	parts := strings.SplitN(raw, "@", 2)
-	if len(parts) != 2 {
-		return "", raw
+	target, err := parseConnectionTarget(raw)
+	if err != nil {
+		raw = strings.TrimSpace(raw)
+		parts := strings.SplitN(raw, "@", 2)
+		if len(parts) != 2 {
+			return "", raw
+		}
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	}
-	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	return target.User, target.Host
 }
 
 func Maps(host, startPath, indexMode, action string, isRemote bool) (string, bool, error) {
@@ -1125,7 +1194,10 @@ func remoteIgnoreRegex(target, basePath string) (string, int) {
 	global := getGlobalIgnoreRegex()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := buildSSHCommand(ctx, target, false, fmt.Sprintf("cd %s && [ -f .gitignore ] && cat .gitignore || true", shellQuote(basePath)))
+	cmd, err := buildSSHCommand(ctx, target, false, fmt.Sprintf("cd %s && [ -f .gitignore ] && cat .gitignore || true", shellQuote(basePath)))
+	if err != nil {
+		return "", 0
+	}
 	var out bytes.Buffer
 	var errBuf bytes.Buffer
 	cmd.Stdout = &out
@@ -1334,21 +1406,8 @@ func remoteJoinPath(current, child string) string {
 }
 
 func looksLikeUserHost(raw string) bool {
-	if strings.Count(raw, "@") != 1 {
-		return false
-	}
-	parts := strings.SplitN(raw, "@", 2)
-	user := strings.TrimSpace(parts[0])
-	host := strings.TrimSpace(parts[1])
-	if user == "" || host == "" {
-		return false
-	}
-	if !userPattern.MatchString(user) {
-		return false
-	}
-
-	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-	return net.ParseIP(host) != nil || hostPattern.MatchString(host)
+	_, err := parseConnectionTarget(raw)
+	return err == nil
 }
 
 func (a *app) newHostCmd() *cobra.Command {
@@ -1373,7 +1432,7 @@ func (a *app) newHostCmd() *cobra.Command {
 	})
 
 	hostCmd.AddCommand(&cobra.Command{
-		Use:   "add [user@ip]",
+		Use:   "add [user@host[:port]]",
 		Short: "Add host to history",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1396,12 +1455,16 @@ func (a *app) newHostCmd() *cobra.Command {
 	})
 
 	hostCmd.AddCommand(&cobra.Command{
-		Use:     "remove [user@ip]",
+		Use:     "remove [user@host[:port]]",
 		Aliases: []string{"rm"},
 		Short:   "Remove host from history",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target := strings.TrimSpace(args[0])
+			targetSpec, err := canonicalConnectionTarget(args[0], a.sshPort)
+			if err != nil {
+				return fmt.Errorf("invalid host format: %w", err)
+			}
+			target := targetSpec.String()
 			hosts, err := a.readHosts()
 			if err != nil {
 				return err
@@ -1456,17 +1519,10 @@ func (a *app) chooseHostAllowNew() (string, error) {
 
 func selectOrQueryFZF(prompt string, options []string) (string, string, error) {
 	if _, err := exec.LookPath("fzf"); err != nil {
-		return "", "", errors.New("fzf not found in PATH")
+		return "", "", fzfNotFoundError()
 	}
 
-	args := []string{
-		"--height", "40%",
-		"--layout", "reverse",
-		"--border",
-		"--prompt", prompt,
-		"--print-query",
-		"--bind", "enter:accept",
-	}
+	args := append(buildFZFArgs(prompt), "--print-query", "--bind", "enter:accept")
 
 	joined := strings.Join(options, "\n")
 	if joined == "" {
@@ -1512,19 +1568,14 @@ func selectOrQueryFZF(prompt string, options []string) (string, string, error) {
 
 func selectFromFZF(prompt string, options []string) (string, error) {
 	if _, err := exec.LookPath("fzf"); err != nil {
-		return "", errors.New("fzf not found in PATH")
+		return "", fzfNotFoundError()
 	}
 
 	if len(options) == 0 {
 		return "", errCancelled
 	}
 
-	args := []string{
-		"--height", "40%",
-		"--layout", "reverse",
-		"--border",
-		"--prompt", prompt,
-	}
+	args := buildFZFArgs(prompt)
 
 	cmd := exec.Command("fzf", args...)
 	cmd.Stdin = strings.NewReader(strings.Join(options, "\n"))
@@ -1556,26 +1607,44 @@ func isFZFCancel(err error) bool {
 	return false
 }
 
-func buildSSHCommand(ctx context.Context, host string, interactive bool, remoteCmd string) *exec.Cmd {
+func buildSSHArgs(host string, interactive bool, remoteCmd string) ([]string, error) {
+	target, err := parseConnectionTarget(host)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{
 		"-o", "ConnectTimeout=" + connectTimeoutSeconds,
 		"-o", "LogLevel=ERROR",
 		"-o", "VisualHostKey=no",
+		"-o", "ServerAliveInterval=20",
+		"-o", "ServerAliveCountMax=3",
 		"-q",
+	}
+	args = append(args, sshMultiplexArgs()...)
+	if target.Port != defaultSSHPort {
+		args = append(args, "-p", strconv.Itoa(target.Port))
 	}
 	if interactive {
 		args = append([]string{"-t", "-t"}, args...)
 	} else {
 		args = append(args, "-o", "StrictHostKeyChecking=accept-new", "-T")
 	}
-	args = append(args, host)
+	args = append(args, target.sshDestination())
 	if strings.TrimSpace(remoteCmd) != "" {
 		args = append(args, remoteCmd)
 	}
-	if ctx == nil {
-		return exec.Command("ssh", args...)
+	return args, nil
+}
+
+func buildSSHCommand(ctx context.Context, host string, interactive bool, remoteCmd string) (*exec.Cmd, error) {
+	args, err := buildSSHArgs(host, interactive, remoteCmd)
+	if err != nil {
+		return nil, err
 	}
-	return exec.CommandContext(ctx, "ssh", args...)
+	if ctx == nil {
+		return exec.Command("ssh", args...), nil
+	}
+	return exec.CommandContext(ctx, "ssh", args...), nil
 }
 
 func runInteractiveSSH(host string) error {
@@ -1583,7 +1652,10 @@ func runInteractiveSSH(host string) error {
 		return fmt.Errorf("ssh not found in PATH: %w", err)
 	}
 
-	cmd := buildSSHCommand(context.Background(), host, true, "")
+	cmd, err := buildSSHCommand(context.Background(), host, true, "")
+	if err != nil {
+		return err
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -1605,7 +1677,10 @@ func probeRemoteWindowsHost(host string) (bool, error) {
 
 	// Probe both Unix-like and Windows-native signals. If MSYS/CYGWIN/MINGW is present,
 	// prefer Unix discovery because find/sort pipelines work there.
-	cmd := buildSSHCommand(ctx, host, false, "(uname -s 2>/dev/null || true); (command -v find >/dev/null 2>&1 && command -v sort >/dev/null 2>&1 && echo UNIX_TOOLS) || true; (cmd /c ver >NUL 2>&1 && echo WINDOWS_NATIVE) || (ver >NUL 2>&1 && echo WINDOWS_NATIVE) || true")
+	cmd, err := buildSSHCommand(ctx, host, false, "(uname -s 2>/dev/null || true); (command -v find >/dev/null 2>&1 && command -v sort >/dev/null 2>&1 && echo UNIX_TOOLS) || true; (cmd /c ver >NUL 2>&1 && echo WINDOWS_NATIVE) || (ver >NUL 2>&1 && echo WINDOWS_NATIVE) || true")
+	if err != nil {
+		return false, err
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1660,6 +1735,8 @@ func isNetworkUnreachableError(msg string) bool {
 type rsyncOptions struct {
 	forceRemoteRsyncPath bool
 	stabilityProfile     bool
+	sshPort              int
+	dryRun               bool
 }
 
 func runRsync(source, destination string, opts rsyncOptions) error {
@@ -1668,10 +1745,10 @@ func runRsync(source, destination string, opts rsyncOptions) error {
 		return err
 	}
 
-	source = normalizeRemoteEndpointPath(source)
-	destination = normalizeRemoteEndpointPath(destination)
-
-	args := buildRsyncArgs(source, destination, opts)
+	args := buildRsyncArgs(rsyncBin, source, destination, opts)
+	if opts.dryRun {
+		fmt.Fprintf(os.Stdout, "Dry run: %s\n", formatCommand(rsyncBin, args))
+	}
 
 	if err := runRsyncCommand(rsyncBin, args); err != nil {
 		// Mixed Windows/MSYS/OpenSSH stacks can intermittently fail with code 12.
@@ -1680,10 +1757,12 @@ func runRsync(source, destination string, opts rsyncOptions) error {
 			retryOpts := opts
 			retryOpts.stabilityProfile = true
 			retryOpts.forceRemoteRsyncPath = true
-			retryArgs := buildRsyncArgs(source, destination, retryOpts)
+			retryArgs := buildRsyncArgs(rsyncBin, source, destination, retryOpts)
 			logVerbose("rsync code 12 detected; retrying with stability profile: %s", formatCommand(rsyncBin, retryArgs))
 			if retryErr := runRsyncCommand(rsyncBin, retryArgs); retryErr == nil {
 				return nil
+			} else {
+				return fmt.Errorf("rsync stability retry failed (%s -> %s): %w", source, destination, retryErr)
 			}
 		}
 		return fmt.Errorf("rsync failed (%s -> %s): %w", source, destination, err)
@@ -1691,12 +1770,12 @@ func runRsync(source, destination string, opts rsyncOptions) error {
 	return nil
 }
 
-func buildRsyncArgs(source, destination string, opts rsyncOptions) []string {
+func buildRsyncArgs(rsyncBin, source, destination string, opts rsyncOptions) []string {
 	args := []string{
 		"-av",
 		// If discovery + transfer are separate SSH sessions, password auth can prompt twice.
 		// Consider ControlMaster/ControlPersist in ~/.ssh/config to reuse one connection.
-		"-e", "ssh -o VisualHostKey=no",
+		"-e", buildRsyncSSHCommand(opts.sshPort),
 		"--blocking-io",
 	}
 	if opts.forceRemoteRsyncPath {
@@ -1709,14 +1788,32 @@ func buildRsyncArgs(source, destination string, opts rsyncOptions) []string {
 		// Keep compression off on Windows stability profile targets.
 	} else {
 		args = append(args, "-z")
+		args = appendSkipCompress(args, rsyncBin)
 	}
 	args = append(args,
 		"--no-p",
 		"--no-g",
 		"--chmod=ugo=rwX",
 	)
+	if opts.dryRun {
+		args = append(args, "--dry-run")
+	}
 	args = append(args, source, destination)
 	return args
+}
+
+func buildRsyncSSHCommand(port int) string {
+	parts := []string{
+		"ssh",
+		"-o", "VisualHostKey=no",
+		"-o", "ServerAliveInterval=20",
+		"-o", "ServerAliveCountMax=3",
+	}
+	if port != 0 && port != defaultSSHPort {
+		parts = append(parts, "-p", strconv.Itoa(port))
+	}
+	parts = append(parts, sshMultiplexArgs()...)
+	return strings.Join(parts, " ")
 }
 
 func runRsyncCommand(rsyncBin string, args []string) error {
@@ -1763,23 +1860,16 @@ func resolveRsyncBinary() (string, error) {
 	return path, nil
 }
 
-func normalizeRemoteEndpointPath(endpoint string) string {
-	host, remotePath, ok := strings.Cut(endpoint, ":")
-	if !ok || !strings.Contains(host, "@") {
-		return endpoint
+func formatRemoteEndpoint(host, remotePath string, quoteForWindows bool) (string, error) {
+	target, err := parseConnectionTarget(host)
+	if err != nil {
+		return "", fmt.Errorf("invalid SSH target %q: %w", host, err)
 	}
-	if strings.Contains(remotePath, "'") || strings.Contains(remotePath, "\"") {
-		return endpoint
-	}
-	return host + ":" + normalizeRemotePathForRsync(remotePath)
-}
-
-func formatRemoteEndpoint(host, remotePath string, quoteForWindows bool) string {
 	normalized := normalizeRemotePathForRsync(remotePath)
 	if quoteForWindows && strings.ContainsAny(normalized, " \t") {
 		normalized = shellQuote(normalized)
 	}
-	return fmt.Sprintf("%s:%s", host, normalized)
+	return fmt.Sprintf("%s:%s", target.rsyncDestination(), normalized), nil
 }
 
 func maybeOpenMedia(remotePath string) {
@@ -1941,28 +2031,8 @@ func shellQuote(s string) string {
 }
 
 func validateUserHost(raw string) error {
-	if strings.Count(raw, "@") != 1 {
-		return validationErr("expected exactly one '@' in user@ip format")
-	}
-
-	parts := strings.SplitN(raw, "@", 2)
-	user := strings.TrimSpace(parts[0])
-	host := strings.TrimSpace(parts[1])
-	if user == "" || host == "" {
-		return validationErr("user and host must both be non-empty")
-	}
-	if !userPattern.MatchString(user) {
-		return validationErr("username contains unsupported characters")
-	}
-
-	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-	if net.ParseIP(host) != nil {
-		return nil
-	}
-	if hostPattern.MatchString(host) {
-		return nil
-	}
-	return validationErr("host must be a valid IP address or hostname")
+	_, err := parseConnectionTarget(raw)
+	return err
 }
 
 func validationErr(msg string) error {
@@ -1984,4 +2054,20 @@ func dedupeKeepOrder(items []string) []string {
 		out = append(out, item)
 	}
 	return out
+}
+
+func normalizeHostHistory(items []string) []string {
+	normalized := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		target, err := parseConnectionTarget(item)
+		if err == nil {
+			item = target.String()
+		}
+		normalized = append(normalized, item)
+	}
+	return dedupeKeepOrder(normalized)
 }
