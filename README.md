@@ -28,13 +28,39 @@ CLI for SSH sessions and remote file sync workflows.
 
 ## Install
 
-Method 1: install from source with Go:
+### Fresh install from GitHub
+
+Install the latest release to `~/.local/bin`:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/theaaravagarwal/nexus/main/install.sh | sh
+```
+
+If `~/.local/bin` is not already on your path, add this to `~/.zshrc` or `~/.bashrc`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Choose a different install directory or version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/theaaravagarwal/nexus/main/install.sh | NEXUS_INSTALL_DIR=/usr/local/bin NEXUS_VERSION=v0.1.0 sh
+```
+
+The installer detects macOS/Linux and ARM64/x86-64, verifies the release checksum, and does not require `sudo` for the default location.
+
+### Install from source
+
+Clone and build:
+
+```bash
+git clone https://github.com/theaaravagarwal/nexus.git
+cd nexus
 go install .
 ```
 
-Method 2: build a local binary:
+Or build a local binary:
 
 ```bash
 go build -o bin/nexus .
