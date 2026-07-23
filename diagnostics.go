@@ -180,7 +180,7 @@ func resolveRemoteProbeCommands(host string, fallbacks []string) ([]string, erro
 		return nil, errNoRemoteProbeCandidates
 	}
 
-	cmd, err := buildSSHCommand(context.Background(), host, false, "sh -lc "+shellQuote(probeScript))
+	cmd, err := buildSSHCommand(context.Background(), host, false, remoteShellCommand("sh", probeScript))
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,10 @@ func resolveRemoteProbeCommands(host string, fallbacks []string) ([]string, erro
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if isExitCode(err, 1) {
+		// POSIX shells are allowed to return either 1 or 127 when every
+		// command -v lookup misses. Both mean "use the portable fallback,"
+		// not that the SSH connection or probe failed.
+		if isRemoteProbeMiss(err) {
 			return nil, errNoRemoteProbeCandidates
 		}
 		message := strings.TrimSpace(stderr.String())
@@ -219,6 +222,10 @@ func resolveRemoteProbeCommands(host string, fallbacks []string) ([]string, erro
 	return ordered, nil
 }
 
+func isRemoteProbeMiss(err error) bool {
+	return isExitCode(err, 1) || isExitCode(err, 127)
+}
+
 func buildRemoteProbeScript(fallbacks []string) (string, map[string]string) {
 	commandByToken := make(map[string]string)
 	var tokens []string
@@ -243,7 +250,7 @@ func buildRemoteProbeScript(fallbacks []string) (string, map[string]string) {
 
 func remoteSupportsPasswordlessSudo(host string) (bool, error) {
 	script := `if [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then exit 0; fi; command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1`
-	cmd, err := buildSSHCommand(context.Background(), host, false, "sh -lc "+shellQuote(script))
+	cmd, err := buildSSHCommand(context.Background(), host, false, remoteShellCommand("sh", script))
 	if err != nil {
 		return false, err
 	}
@@ -269,9 +276,9 @@ func requiresElevatedNetworkAccess(command string) bool {
 func runRemoteInteractiveCommand(host, runScript string) error {
 	runners := []string{
 		runScript,
-		"sh -lc " + shellQuote(runScript),
-		"bash -lc " + shellQuote(runScript),
-		"zsh -lc " + shellQuote(runScript),
+		remoteShellCommand("sh", runScript),
+		remoteShellCommand("bash", runScript),
+		remoteShellCommand("zsh", runScript),
 	}
 	var lastErr error
 	for _, remoteCommand := range runners {
@@ -291,6 +298,10 @@ func runRemoteInteractiveCommand(host, runScript string) error {
 		}
 	}
 	return fmt.Errorf("unable to run remote command on %s: %w", host, lastErr)
+}
+
+func remoteShellCommand(shell, script string) string {
+	return shell + " -c " + shellQuote(script)
 }
 
 func firstToken(command string) string {

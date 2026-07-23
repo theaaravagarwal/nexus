@@ -752,13 +752,13 @@ func (m dashboardModel) workspaceBottomView(s dashboardStyles, width, height int
 			s.focus.Render("QUICK ACTIONS"),
 			s.text.Render("enter") + s.muted.Render(" connect    "),
 			s.text.Render("c") + s.muted.Render(" commands    "),
-			s.text.Render("p / u") + s.muted.Render(" pull / push    "),
-			s.text.Render("i") + s.muted.Render(" refresh system info    "),
-			s.text.Render("t") + s.muted.Render(" show workspace map"),
+			s.text.Render("p/u") + s.muted.Render(" transfer    "),
+			s.text.Render("i") + s.muted.Render(" refresh info    "),
+			s.text.Render("t") + s.muted.Render(" show map"),
 		}
 		return s.panel.BorderLeft(false).BorderRight(false).BorderBottom(false).
 			Width(max(1, width-2)).Height(max(1, height-1)).Padding(0, 2).
-			Render(strings.Join(content, ""))
+			Render(strings.Join(content, "  "))
 	}
 	mapWidth := max(52, width*64/100)
 	actionWidth := max(28, width-mapWidth)
@@ -1119,7 +1119,7 @@ func runConfiguredRemoteCommand(target, command string) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	remote := "sh -lc " + shellQuote(command)
+	remote := remoteShellCommand("sh", command)
 	cmd, err := buildSSHCommand(ctx, target, true, remote)
 	if err != nil {
 		return err

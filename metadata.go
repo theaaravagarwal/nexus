@@ -14,7 +14,7 @@ const metadataScript = `os=""; if [ -r /etc/os-release ]; then os=$(sed -n 's/^P
 func refreshHostMetadata(statePath, target string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	args, err := buildSSHArgs(target, false, "sh -lc "+shellQuote(metadataScript))
+	args, err := buildSSHArgs(target, false, remoteShellCommand("sh", metadataScript))
 	if err != nil {
 		return err
 	}

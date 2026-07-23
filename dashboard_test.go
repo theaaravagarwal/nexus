@@ -51,7 +51,7 @@ func TestDashboardTopologyToggleChangesWideWorkspace(t *testing.T) {
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	model = updated.(dashboardModel)
 	view := model.View()
-	if strings.Contains(view, "WORKSPACE MAP") || !strings.Contains(view, "show workspace map") {
+	if strings.Contains(view, "WORKSPACE MAP") || !strings.Contains(view, "show map") {
 		t.Fatalf("topology toggle had no visible effect:\n%s", view)
 	}
 }
