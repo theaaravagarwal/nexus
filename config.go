@@ -89,7 +89,7 @@ func ensureConfigFile(configPath string) error {
 				return fmt.Errorf("failed to protect config file: %w", err)
 			}
 		}
-		return nil
+		return ensureSavedCommandExamples(configPath)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to inspect config file: %w", err)
@@ -100,7 +100,7 @@ func ensureConfigFile(configPath string) error {
 func defaultConfigYAML() string {
 	return `# Nexus settings
 # Open this file with: nexus config
-# Preview themes with: nexus theme preview
+# In the TUI, press T to preview or save a theme.
 
 full_index_depth: 5
 
@@ -128,16 +128,9 @@ fzf:
 
 # Commands here are available for every host. Nexus always asks before running.
 commands: []
-#  - name: uptime
-#    description: Show system uptime
-#    command: uptime
 
 # Commands inherited by every host with a matching tag.
 tag_commands: {}
-#  prod:
-#    - name: logs
-#      description: Follow service logs
-#      command: journalctl -u app -f
 
 # Keys may be a full saved target (recommended) or host/IP for legacy configs.
 host_profiles:
@@ -148,7 +141,113 @@ host_profiles:
     commands: []
     use_unix_discovery: true
     rsync_stability: true
+` + savedCommandExamplesYAML
+}
+
+const savedCommandExamplesYAML = `
+# Saved command examples (remove the leading # characters to use them):
+#
+# 1. A read-only command available on every saved computer:
+# commands:
+#   - name: disk usage
+#     description: Show free space on every mounted filesystem
+#     command: df -h
+#
+# 2. A command available only to hosts tagged "prod":
+# tag_commands:
+#   prod:
+#     - name: recent service logs
+#       description: Show the last 100 lines from the app service
+#       command: journalctl -u app -n 100 --no-pager
+#
+# Put a commands list inside one host_profiles entry to limit commands to that
+# exact user@host:port. Nexus displays the exact command and asks before running.
 `
+
+func ensureSavedCommandExamples(configPath string) error {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file %s: %w", configPath, err)
+	}
+	if bytes.Contains(raw, []byte("# Saved command examples")) {
+		return nil
+	}
+	raw = bytes.TrimRight(raw, "\r\n")
+	raw = append(raw, []byte("\n"+savedCommandExamplesYAML)...)
+	if err := atomicWritePrivate(configPath, raw); err != nil {
+		return fmt.Errorf("failed to add saved-command examples: %w", err)
+	}
+	return nil
+}
+
+func saveThemeToConfig(configPath, name string) error {
+	name = normalizeThemeName(name)
+	if _, ok := themes[name]; !ok {
+		return fmt.Errorf("unknown UI theme %q", name)
+	}
+	if configPath == "" {
+		return errors.New("config path is empty")
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file %s: %w", configPath, err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return fmt.Errorf("invalid config YAML %s: %w", configPath, err)
+	}
+	if len(document.Content) == 0 {
+		return fmt.Errorf("invalid config YAML %s: empty document", configPath)
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return fmt.Errorf("invalid config YAML %s: root must be a mapping", configPath)
+	}
+	ui := mappingValue(root, "ui")
+	if ui == nil {
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "ui"},
+			&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"},
+		)
+		ui = root.Content[len(root.Content)-1]
+	}
+	if ui.Kind != yaml.MappingNode {
+		return fmt.Errorf("invalid config YAML %s: ui must be a mapping", configPath)
+	}
+	themeNode := mappingValue(ui, "theme")
+	if themeNode == nil {
+		ui.Content = append(ui.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "theme"},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str"},
+		)
+		themeNode = ui.Content[len(ui.Content)-1]
+	}
+	themeNode.Kind = yaml.ScalarNode
+	themeNode.Tag = "!!str"
+	themeNode.Value = name
+
+	var output bytes.Buffer
+	encoder := yaml.NewEncoder(&output)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&document); err != nil {
+		return fmt.Errorf("failed to encode config YAML: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return fmt.Errorf("failed to finish config YAML: %w", err)
+	}
+	if err := atomicWritePrivate(configPath, output.Bytes()); err != nil {
+		return fmt.Errorf("failed to save theme: %w", err)
+	}
+	return nil
+}
+
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
 }
 
 func loadAppConfig(configPath string) (appConfig, error) {

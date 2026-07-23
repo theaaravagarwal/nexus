@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,84 @@ func TestEnsureConfigFileUsesPrivatePermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("mode=%o", got)
+	}
+}
+
+func TestEnsureConfigFileAddsExamplesToExistingConfigOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("full_index_depth: 7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(raw), "# Saved command examples"); count != 1 {
+		t.Fatalf("example marker count=%d:\n%s", count, raw)
+	}
+	cfg, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FullIndexDepth != 7 {
+		t.Fatalf("existing setting changed: %#v", cfg)
+	}
+}
+
+func TestSaveThemeToConfigPreservesSettingsAndComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `# keep this note
+full_index_depth: 7
+ui:
+  theme: nexus
+  background: transparent
+commands:
+  - name: uptime
+    description: Show uptime
+    command: uptime
+`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveThemeToConfig(path, "nord"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UI.Theme != "nord" || cfg.UI.Background != "transparent" || cfg.FullIndexDepth != 7 ||
+		len(cfg.Commands) != 1 || cfg.Commands[0].Command != "uptime" {
+		t.Fatalf("settings changed while saving theme: %#v", cfg)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "# keep this note") {
+		t.Fatalf("comment was lost:\n%s", saved)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode=%o", got)
+	}
+}
+
+func TestDefaultConfigIncludesSavedCommandExamples(t *testing.T) {
+	config := defaultConfigYAML()
+	for _, want := range []string{"press T", "disk usage", "journalctl -u app", "exact user@host:port"} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("default config missing %q", want)
+		}
 	}
 }
 

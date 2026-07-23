@@ -41,7 +41,6 @@ const (
 	actionConfig  dashboardAction = "config"
 	actionFleet   dashboardAction = "fleet"
 	actionThemes  dashboardAction = "themes"
-	actionGuide   dashboardAction = "guide"
 )
 
 type dashboardSelection struct {
@@ -87,6 +86,11 @@ type transferScanMsg struct {
 	Err   error
 }
 
+type themeSaveMsg struct {
+	Name string
+	Err  error
+}
+
 type transferStage string
 
 const (
@@ -125,11 +129,11 @@ type dashboardModel struct {
 	confirmAction dashboardSelection
 	transfer      *transferFlow
 	helpOpen      bool
-	guideOpen     bool
 	themeOpen     bool
 	themeCursor   int
 	themeOriginal theme
 	themePreview  bool
+	themeSaving   bool
 	showTopology  bool
 	probing       bool
 	probeQueue    []string
@@ -139,6 +143,7 @@ type dashboardModel struct {
 	probeComplete int
 	metadataBusy  map[string]bool
 	statePath     string
+	configPath    string
 	indexMode     string
 	notice        string
 	noticeError   bool
@@ -444,6 +449,21 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = "System snapshot refreshed for " + m.displayNameForTarget(msg.Target)
 		m.noticeError = false
 		return m, nil
+	case themeSaveMsg:
+		m.themeSaving = false
+		if msg.Err != nil {
+			m.notice = "Theme save failed: " + sanitizeTerminalText(msg.Err.Error())
+			m.noticeError = true
+			return m, nil
+		}
+		loadedConfig.UI.Theme = msg.Name
+		m.theme = activeTheme()
+		m.themeOriginal = m.theme
+		m.themeOpen = false
+		m.themePreview = false
+		m.notice = "Theme saved as default: " + msg.Name
+		m.noticeError = false
+		return m, nil
 	case transferScanMsg:
 		if m.transfer == nil || m.transfer.Stage != msg.Stage {
 			return m, nil
@@ -501,15 +521,6 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if m.guideOpen {
-		switch key {
-		case "esc", "q", "a":
-			m.guideOpen = false
-		case "e", "enter":
-			return m.choose(actionConfig)
-		}
-		return m, nil
-	}
 	if m.showTopology {
 		switch key {
 		case "esc", "q", "t":
@@ -532,8 +543,14 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.themeOpen = false
 			m.themePreview = m.theme.Name != activeTheme().Name
-		case "e":
-			return m.choose(actionConfig)
+			m.notice = "Using theme for this session: " + m.theme.Name
+			m.noticeError = false
+		case "s":
+			if !m.themeSaving {
+				m.themeSaving = true
+				name := names[m.themeCursor]
+				return m, m.saveThemeCommand(name)
+			}
 		}
 		return m, nil
 	}
@@ -574,10 +591,6 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case actionThemes:
 				m.commandOpen = false
 				m.openThemePreview()
-				return m, nil
-			case actionGuide:
-				m.commandOpen = false
-				m.guideOpen = true
 				return m, nil
 			case actionConfig:
 				return m.choose(actionConfig)
@@ -655,6 +668,8 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startTransfer(actionPush)
 	case "t":
 		m.showTopology = true
+	case "T":
+		m.openThemePreview()
 	case "r":
 		target := m.selectedTarget()
 		if target != "" && !m.probing {
@@ -675,7 +690,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		return m.choose(actionConfig)
 	case "a":
-		m.guideOpen = true
+		return m.choose(actionConfig)
 	}
 	return m, nil
 }
@@ -691,6 +706,13 @@ func (m *dashboardModel) openThemePreview() {
 		}
 	}
 	m.themeOpen = true
+}
+
+func (m dashboardModel) saveThemeCommand(name string) tea.Cmd {
+	configPath := m.configPath
+	return func() tea.Msg {
+		return themeSaveMsg{Name: name, Err: saveThemeToConfig(configPath, name)}
+	}
 }
 
 func (m *dashboardModel) moveCursor(delta int) {
@@ -759,9 +781,8 @@ func (m dashboardModel) displayNameForTarget(target string) string {
 func (m dashboardModel) availableCommands() []dashboardCommand {
 	if m.selectedTarget() == "" {
 		return []dashboardCommand{
-			{Label: "Saved command guide", Description: "Learn and configure reusable commands", Action: actionGuide},
 			{Label: "Theme preview", Description: "Preview Nexus themes", Action: actionThemes},
-			{Label: "Edit full config", Description: "Open config.yaml", Action: actionConfig},
+			{Label: "Edit config & commands", Description: "Open config.yaml with commented examples", Action: actionConfig},
 		}
 	}
 	commands := []dashboardCommand{
@@ -772,7 +793,6 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 		{"System monitor", "Open the best available monitor", actionTop, commandConfig{}},
 		{"Network tools", "Open remote network diagnostics", actionNet, commandConfig{}},
 		{"Storage tools", "Inspect disk usage", actionStorage, commandConfig{}},
-		{"Saved command guide", "Learn and configure reusable commands", actionGuide, commandConfig{}},
 		{"Fleet overview", "Inspect saved peers", actionFleet, commandConfig{}},
 		{"Theme preview", "Preview Nexus themes", actionThemes, commandConfig{}},
 	}
@@ -781,7 +801,7 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 			Label: command.Name, Description: command.Description, Action: actionCustom, Command: command,
 		})
 	}
-	commands = append(commands, dashboardCommand{"Edit full config", "Open config.yaml", actionConfig, commandConfig{}})
+	commands = append(commands, dashboardCommand{"Edit config & commands", "Open config.yaml with commented examples", actionConfig, commandConfig{}})
 	return commands
 }
 
@@ -816,9 +836,6 @@ func (m dashboardModel) View() string {
 	}
 	if m.confirmOpen {
 		return fitTerminalView(m.confirmCommandView(), m.width, m.height)
-	}
-	if m.guideOpen {
-		return fitTerminalView(m.savedCommandGuideView(), m.width, m.height)
 	}
 	if m.showTopology {
 		return fitTerminalView(m.fleetView(), m.width, m.height)
@@ -1078,13 +1095,13 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 	if len(commands) == 0 {
 		lines = append(lines,
 			s.text.Render("None configured"),
-			s.muted.Render("[a] setup guide  ·  example: uptime"),
+			s.muted.Render("[e] edit config · examples included"),
 		)
 	} else {
 		for _, command := range commands {
 			lines = append(lines, s.text.Render(command.Name)+"  "+s.muted.Render(command.Description))
 		}
-		lines = append(lines, s.muted.Render("[ctrl+k] choose  ·  [a] setup guide"))
+		lines = append(lines, s.muted.Render("[ctrl+k] choose  ·  [e] edit config"))
 	}
 	content := strings.Join(lines, "\n")
 	return s.panel.BorderLeft(false).BorderTop(false).BorderRight(false).BorderBottom(false).
@@ -1137,8 +1154,9 @@ func (m dashboardModel) footerView(s dashboardStyles) string {
 		right = fmt.Sprintf("◌ probing %d/%d", m.probeComplete, m.probeTotal)
 	}
 	if right == "" {
-		right = "ready"
+		right = m.theme.Name + " · [T] theme"
 	}
+	right = ansi.Truncate(right, max(1, m.width-lipgloss.Width(hints)-5), "…")
 	gap := max(1, m.width-lipgloss.Width(hints)-lipgloss.Width(right)-4)
 	return s.panel.BorderBottom(false).BorderLeft(false).BorderRight(false).
 		Width(max(1, m.width-2)).Padding(0, 1).
@@ -1186,7 +1204,7 @@ func (m dashboardModel) commandPaletteView() string {
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "", s.muted.Render("[enter] choose   [esc] close   saved commands always confirm"))
+	lines = append(lines, "", s.muted.Render("[enter] choose   [esc] close   saved commands confirm before running"))
 	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
 }
@@ -1196,14 +1214,18 @@ func (m dashboardModel) themePreviewView() string {
 	names := themeNames()
 	width := min(max(46, m.width-16), 72)
 	lines := []string{
-		s.focus.Render("THEME PREVIEW"),
-		s.muted.Render("Live preview across every semantic role"),
+		s.focus.Render("THEMES"),
+		s.muted.Render("Preview live, then use once or save as your default"),
 		"",
 	}
 	for index, name := range names {
 		t := themes[name]
 		swatch := themeSwatch(t, m.plain)
-		line := fmt.Sprintf("%-12s %s", name, swatch)
+		status := ""
+		if name == normalizeThemeName(loadedConfig.UI.Theme) {
+			status = "  default"
+		}
+		line := fmt.Sprintf("%-12s %s%s", name, swatch, status)
 		if index == m.themeCursor {
 			line = s.selected.Render("› " + padCell(line, width-6))
 		} else {
@@ -1215,9 +1237,14 @@ func (m dashboardModel) themePreviewView() string {
 		"",
 		s.live.Render("● online")+"  "+s.warning.Render("! refused")+"  "+s.failure.Render("× unavailable")+"  "+s.focus.Render("◆ focus"),
 		"",
-		s.muted.Render("[↑↓] preview   [enter] use this session"),
-		s.muted.Render("[e] edit config to save   [esc] restore"),
+		s.muted.Render("[↑↓] preview   [enter] use once   [s] save default"),
+		s.muted.Render("[esc] restore previous theme"),
 	)
+	if m.themeSaving {
+		lines = append(lines, s.live.Render("◌ saving theme…"))
+	} else if m.noticeError && strings.HasPrefix(m.notice, "Theme save failed:") {
+		lines = append(lines, s.failure.Render(truncateText(m.notice, width-6)))
+	}
 	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
 }
@@ -1337,33 +1364,6 @@ func transferPathLabel(item string, stage transferStage) string {
 	return relative
 }
 
-func (m dashboardModel) savedCommandGuideView() string {
-	s := m.styles()
-	width := min(max(48, m.width-14), 78)
-	lines := []string{
-		s.focus.Render("SAVED COMMANDS"),
-		s.text.Render("Reusable remote commands that Nexus always shows and confirms before running."),
-		"",
-		s.focus.Render("ADD ONE"),
-		"1  Open the full config with e",
-		"2  Add a name, description, and exact command",
-		"3  Save, return to Nexus, then choose it from Ctrl+K",
-		"",
-		s.focus.Render("EXAMPLE · available for every host"),
-		s.muted.Render("commands:"),
-		s.muted.Render("  - name: uptime"),
-		s.muted.Render("    description: Show system uptime"),
-		s.muted.Render("    command: uptime"),
-		"",
-		s.muted.Render("Use host_profiles for one endpoint or tag_commands for a group."),
-		s.warning.Render("Nexus never runs a saved command without confirmation."),
-		"",
-		s.muted.Render("[e/enter] edit full config   [esc] back"),
-	}
-	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
-}
-
 func (m dashboardModel) confirmCommandView() string {
 	s := m.styles()
 	selection := m.confirmAction
@@ -1407,7 +1407,7 @@ func (m dashboardModel) helpView() string {
 			"j/k    move         c  actions",
 			"p/u    transfer     i  refresh info",
 			"r      probe host   t  fleet",
-			"a      saved cmds   ?  this help",
+			"T      themes       e  edit config",
 			"",
 			"● online  ! refused  × unavailable",
 			s.muted.Render("esc close"),
@@ -1428,8 +1428,8 @@ func (m dashboardModel) helpView() string {
 		"n / d        network / storage tools",
 		"r / R        probe selected / all hosts",
 		"t            open fleet overview",
-		"a            explain and add saved commands",
-		"e            edit full YAML configuration",
+		"T            preview or save a theme",
+		"e / a        edit YAML config and saved commands",
 		"? / esc      close help",
 		"",
 		"● online   ! refused   × unavailable   ◌ checking",
@@ -1604,6 +1604,7 @@ func (a *app) runDashboard() error {
 		hosts = sortHostsByFrecency(hosts, state, now)
 		model := newDashboardModelWithState(hosts, state, now)
 		model.statePath = a.stateFile
+		model.configPath = a.configFile
 		model.indexMode = normalizeRemoteIndexMode(a.remoteIndex)
 		model.notice = notice
 		model.noticeError = noticeError

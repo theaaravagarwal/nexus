@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
-- Rich constellation-workbench TUI with navigation, host dossiers, workspace map, command palette, responsive layouts, and contextual help.
+- Host-first TUI with navigation, selected-host details, command palette, responsive layouts, and contextual help.
 - Zoxide-style host frecency ordering based on successful use and recency.
 - Saved-port TCP reachability and latency checks that never authenticate in the background.
 - Cached remote OS, CPU, memory, disk, and supported-tool summaries refreshed through explicit system-info actions.
@@ -21,10 +21,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - UI themes now apply consistently to the dashboard, help output, and FZF.
 - The dashboard now uses truthful workspace actions, freshness-aware system snapshots, distinct monochrome reachability glyphs, an honest saved-peer fleet overview, and live in-TUI theme previews.
-- The dashboard now defaults to a calmer two-region daily-driver layout with compact host rows and on-demand fleet, theme, and saved-command guidance.
+- The dashboard now defaults to a calmer two-region daily-driver layout with compact host rows and on-demand fleet, themes, and saved commands.
 - Reachability results stream per host, authenticated system snapshots refresh without leaving the TUI, and terminal-owning actions return to the same selected host with completion or recovery status.
 - Pull and push path discovery now run inside a native TUI picker instead of dropping into an external FZF session.
-- Saved commands now include an in-TUI explanation, safe YAML example, scope guidance, and exact-command confirmation.
+- Themes can now be previewed, applied, and saved as the default directly inside the TUI with a discoverable shortcut.
+- Saved-command setup now stays out of the primary TUI flow; concise global and tag-scoped examples live alongside the relevant YAML configuration, while exact-command confirmation remains in the TUI.
 - Nexus configuration and state files use private permissions, atomic locked updates, strict YAML fields, and terminal-control sanitization.
 - Remote diagnostics avoid login-shell startup files and use portable system and network summaries when optional probe utilities are unavailable.
 - Interactive SSH sessions distinguish remote shell exit codes from connection failures.

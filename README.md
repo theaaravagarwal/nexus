@@ -146,15 +146,15 @@ nexus --port 2200 ssh user@example-host
 | `j` / `k` or arrows | Select a host |
 | `/` or `f` | Filter hosts |
 | `enter` / `s` | SSH |
-| `tab`, `h` / `l` | Move workspace focus |
 | `ctrl+k` / `c` | Open command palette |
 | `g` / `G`, `pgup` / `pgdown` | Jump through large histories |
 | `p` / `u` | Pull / push |
-| `t` / `i` | Toggle topology / system info |
+| `t` | Open the fleet overview |
+| `i` | Refresh system info in the background |
 | `n` / `d` | Network / storage |
-| `r` | Refresh saved-port reachability |
-| `e` | Open detailed YAML configuration |
-| Wide rail → `Themes` | Preview every theme live; `e` opens YAML to save |
+| `r` / `R` | Refresh selected / all saved-port reachability |
+| `T` | Preview themes; `enter` uses once and `s` saves the default |
+| `e` / `a` | Edit YAML configuration and saved commands |
 | `?` | Contextual help |
 | `q` / `esc` | Quit |
 
@@ -213,7 +213,10 @@ How to use the config:
 1. Add hosts with `nexus host add user@host`.
 2. Open the config with `nexus config`.
 3. Under `host_profiles`, use the full saved target when profiles differ by user or port.
-4. Save and reopen Nexus; aliases, tags, commands, and themes apply automatically.
+4. Save and return to Nexus; aliases, tags, and commands reload automatically.
+
+For themes, press `T` in the dashboard, preview with the arrow keys, then press
+`enter` to use one for the current session or `s` to save it as the default.
 
 Useful configuration commands:
 

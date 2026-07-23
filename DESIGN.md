@@ -42,8 +42,8 @@ The default `nexus` theme is anchored by:
 - Wide: two-region host list and selected-host summary. Fleet, themes, saved
   commands, and deeper actions appear only when requested.
 - `Enter` always connects; `/` searches; `Ctrl+K` opens actions; `i` refreshes
-  system details in the background; `a` explains saved commands; `?` explains
-  the current surface.
+  system details in the background; `T` previews and saves themes; `e` edits
+  configuration and saved commands; `?` explains the current surface.
 - Selection and focus remain visible without relying on color.
 - Reachability is visually encoded as `●` online, `!` refused, `×` unavailable,
   and `◌` checking, so state survives monochrome terminals.
@@ -52,8 +52,9 @@ The default `nexus` theme is anchored by:
 - Finite scans update inside the TUI. Pull/push path discovery uses a native
   terminal picker; only the actual transfer temporarily owns the terminal.
   Terminal-owning actions restore the same selected host when they finish.
-- The footer prioritizes active work, completion, and recovery over static
-  theme or shortcut status.
+- The footer prioritizes active work, completion, and recovery. When idle, it
+  shows the active theme and its direct shortcut without adding another action
+  to the primary workflow.
 
 ## Component character
 
@@ -64,8 +65,7 @@ state without moving the user's current selection.
 
 ## Themes and configuration
 
-Built-in themes share identical semantic roles and component behavior. YAML
-selects a named theme and opaque or transparent background; advanced users can
-override semantic colors. Theme choice applies consistently to the TUI, help,
-and FZF. The TUI can preview themes live without saving; detailed persistence
-remains an explicit YAML edit.
+Built-in themes share identical semantic roles and component behavior. Press
+`T` to preview them live, `Enter` to use one for the session, or `s` to save it
+as the YAML default. Advanced users can still override semantic colors in YAML.
+Theme choice applies consistently to the TUI, help, and FZF.

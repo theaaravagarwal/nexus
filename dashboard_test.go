@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -112,17 +114,12 @@ func TestDashboardProbeResultsStreamPerHost(t *testing.T) {
 	}
 }
 
-func TestDashboardSavedCommandGuideExplainsSetup(t *testing.T) {
+func TestDashboardSavedCommandShortcutOpensConfig(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	model = updated.(dashboardModel)
-	if cmd != nil || !model.guideOpen {
-		t.Fatalf("saved-command guide did not open: cmd=%v model=%#v", cmd, model)
-	}
-	for _, want := range []string{"Reusable remote commands", "name: uptime", "host_profiles", "without confirmation"} {
-		if !strings.Contains(model.View(), want) {
-			t.Fatalf("guide missing %q:\n%s", want, model.View())
-		}
+	if cmd == nil || !model.done || model.choice.Action != actionConfig {
+		t.Fatalf("saved-command shortcut did not open config: cmd=%v model=%#v", cmd, model)
 	}
 }
 
@@ -185,10 +182,65 @@ func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
 		t.Fatal("theme preview did not advance")
 	}
 	view := model.View()
-	for _, want := range []string{"THEME PREVIEW", "use this session", "edit config to save"} {
+	for _, want := range []string{"THEMES", "use once", "save default"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("theme preview missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestDashboardThemeShortcutSavesDefaultInsideTUI(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(defaultConfigYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := newDashboardModel([]string{"alice@one"})
+	model.configPath = configPath
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	model = updated.(dashboardModel)
+	if cmd != nil || !model.themeOpen {
+		t.Fatalf("T did not open themes: cmd=%v model=%#v", cmd, model)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(dashboardModel)
+	selected := model.theme.Name
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.themeSaving {
+		t.Fatalf("theme save did not start: cmd=%v model=%#v", cmd, model)
+	}
+	message := cmd()
+	updated, cmd = model.Update(message)
+	model = updated.(dashboardModel)
+	if cmd != nil || model.themeOpen || model.themeSaving || model.noticeError ||
+		loadedConfig.UI.Theme != selected || !strings.Contains(model.notice, selected) {
+		t.Fatalf("theme save did not finish inside TUI: cmd=%v model=%#v config=%#v", cmd, model, loadedConfig.UI)
+	}
+	cfg, err := loadAppConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UI.Theme != selected {
+		t.Fatalf("saved theme=%q want=%q", cfg.UI.Theme, selected)
+	}
+}
+
+func TestDashboardThemeSaveFailureIsVisible(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.openThemePreview()
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = updated.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("theme save did not start")
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(dashboardModel)
+	if !model.themeOpen || !model.noticeError || !strings.Contains(model.View(), "Theme save failed:") {
+		t.Fatalf("theme save failure is not recoverable in context: %#v\n%s", model, model.View())
 	}
 }
 
@@ -278,7 +330,7 @@ func TestDashboardRenderStaysWithinTerminalBounds(t *testing.T) {
 
 func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 	for _, size := range [][2]int{{40, 16}, {72, 20}, {120, 32}} {
-		for _, overlay := range []string{"help", "commands", "themes", "guide", "confirm", "fleet", "transfer"} {
+		for _, overlay := range []string{"help", "commands", "themes", "confirm", "fleet", "transfer"} {
 			model := newDashboardModel([]string{"alice@one"})
 			model.width, model.height = size[0], size[1]
 			switch overlay {
@@ -288,8 +340,6 @@ func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 				model.commandOpen = true
 			case "themes":
 				model.openThemePreview()
-			case "guide":
-				model.guideOpen = true
 			case "confirm":
 				model.confirmOpen = true
 				model.confirmAction = dashboardSelection{
