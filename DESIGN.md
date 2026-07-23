@@ -41,9 +41,10 @@ The default `nexus` theme is anchored by:
 - Medium: host list plus stacked details.
 - Wide: two-region host list and selected-host summary. Fleet, themes, saved
   commands, and deeper actions appear only when requested.
-- `Enter` always connects; `/` searches; `Ctrl+K` opens actions; `i` refreshes
-  system details in the background; `T` previews and saves themes; `e` edits
-  configuration and saved commands; `?` explains the current surface.
+- The workspace uses six canonical keys: `j/k` move, `Enter` connects, `/`
+  finds, `a` opens every action, `h` explains every key, and `q` quits.
+  Lists reuse `j/k`, `Enter`, and `Esc`; specialized keys appear only in the
+  context that uses them.
 - Selection and focus remain visible without relying on color.
 - Reachability is visually encoded as `●` online, `!` refused, `×` unavailable,
   and `◌` checking, so state survives monochrome terminals.
@@ -52,9 +53,12 @@ The default `nexus` theme is anchored by:
 - Finite scans update inside the TUI. Pull/push path discovery uses a native
   terminal picker; only the actual transfer temporarily owns the terminal.
   Terminal-owning actions restore the same selected host when they finish.
-- The footer prioritizes active work, completion, and recovery. When idle, it
-  shows the active theme and its direct shortcut without adding another action
-  to the primary workflow.
+- Saved commands display bounded, sanitized stdout/stderr in a scrollable TUI
+  result view. Only commands explicitly marked `interactive` temporarily own
+  the terminal.
+- The footer shows the four primary workspace actions and points to `h` for the
+  complete key reference. Active work, completion, and recovery replace that
+  secondary hint when relevant.
 
 ## Component character
 
@@ -65,7 +69,7 @@ state without moving the user's current selection.
 
 ## Themes and configuration
 
-Built-in themes share identical semantic roles and component behavior. Press
-`T` to preview them live, `Enter` to use one for the session, or `s` to save it
-as the YAML default. Advanced users can still override semantic colors in YAML.
-Theme choice applies consistently to the TUI, help, and FZF.
+Built-in themes share identical semantic roles and component behavior. Open
+Actions with `a`, choose Theme preview, then use `Enter` for the session or `s`
+to save the YAML default. Advanced users can still override semantic colors in
+YAML. Theme choice applies consistently to the TUI, help, and FZF.

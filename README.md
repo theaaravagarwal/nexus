@@ -143,20 +143,18 @@ nexus --port 2200 ssh user@example-host
 
 | Key | Action |
 |---|---|
-| `j` / `k` or arrows | Select a host |
-| `/` or `f` | Filter hosts |
-| `enter` / `s` | SSH |
-| `ctrl+k` / `c` | Open command palette |
-| `g` / `G`, `pgup` / `pgdown` | Jump through large histories |
-| `p` / `u` | Pull / push |
-| `t` | Open the fleet overview |
-| `i` | Refresh system info in the background |
-| `n` / `d` | Network / storage |
-| `r` / `R` | Refresh selected / all saved-port reachability |
-| `T` | Preview themes; `enter` uses once and `s` saves the default |
-| `e` / `a` | Edit YAML configuration and saved commands |
-| `?` | Contextual help |
-| `q` / `esc` | Quit |
+| `j` / `k` | Select a host or move within a list |
+| `enter` | Connect, or choose the selected list item |
+| `/` | Find hosts; inside Actions, filter the action list |
+| `a` | Open every operation and saved command |
+| `h` | Open the complete contextual key reference |
+| `esc` | Go back or cancel the current context |
+| `q` | Quit from the workspace |
+
+The Actions list contains pull, push, selected/all connection checks, background
+system refresh, system/network/storage tools, fleet, themes, configuration, and
+saved commands. This keeps the workspace key map small instead of assigning a
+second shortcut to every feature.
 
 ## Configuration
 
@@ -204,6 +202,7 @@ host_profiles:
       - name: logs
         description: Follow application logs
         command: journalctl -u app -f
+        interactive: true
     use_unix_discovery: true
     rsync_stability: true
 ```
@@ -215,7 +214,7 @@ How to use the config:
 3. Under `host_profiles`, use the full saved target when profiles differ by user or port.
 4. Save and return to Nexus; aliases, tags, and commands reload automatically.
 
-For themes, press `T` in the dashboard, preview with the arrow keys, then press
+For themes, press `a`, choose **Theme preview**, move with `j/k`, then press
 `enter` to use one for the current session or `s` to save it as the default.
 
 Useful configuration commands:
@@ -239,6 +238,8 @@ Config keys:
 - `commands`: global confirmed remote commands.
 - `tag_commands.<tag>`: commands inherited by matching host tags.
 - `host_profiles.<target>.alias` / `tags` / `os` / `commands`: TUI metadata and per-host commands.
+- `commands[].interactive`: set to `true` only when a command needs to own the
+  terminal, such as `tmux attach`; ordinary command output stays inside Nexus.
 - `host_profiles.<host>.use_unix_discovery`: force Unix-style discovery commands for that host.
 - `host_profiles.<host>.rsync_stability`: enables conservative `rsync` profile for reliability on mixed environments.
 

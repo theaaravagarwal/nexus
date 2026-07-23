@@ -30,17 +30,19 @@ FORM: Daily-driver terminal workspace with information density under control.
 type dashboardAction string
 
 const (
-	actionSSH     dashboardAction = "ssh"
-	actionPull    dashboardAction = "pull"
-	actionPush    dashboardAction = "push"
-	actionTop     dashboardAction = "top"
-	actionNet     dashboardAction = "net"
-	actionInfo    dashboardAction = "info"
-	actionStorage dashboardAction = "storage"
-	actionCustom  dashboardAction = "custom"
-	actionConfig  dashboardAction = "config"
-	actionFleet   dashboardAction = "fleet"
-	actionThemes  dashboardAction = "themes"
+	actionSSH      dashboardAction = "ssh"
+	actionPull     dashboardAction = "pull"
+	actionPush     dashboardAction = "push"
+	actionTop      dashboardAction = "top"
+	actionNet      dashboardAction = "net"
+	actionInfo     dashboardAction = "info"
+	actionStorage  dashboardAction = "storage"
+	actionCustom   dashboardAction = "custom"
+	actionConfig   dashboardAction = "config"
+	actionFleet    dashboardAction = "fleet"
+	actionThemes   dashboardAction = "themes"
+	actionProbe    dashboardAction = "probe"
+	actionProbeAll dashboardAction = "probe-all"
 )
 
 type dashboardSelection struct {
@@ -91,6 +93,18 @@ type themeSaveMsg struct {
 	Err  error
 }
 
+type configuredCommandMsg struct {
+	Output string
+	Err    error
+}
+
+type configuredCommandResult struct {
+	Host    string
+	Command commandConfig
+	Output  string
+	Err     string
+}
+
 type transferStage string
 
 const (
@@ -113,43 +127,47 @@ type transferFlow struct {
 }
 
 type dashboardModel struct {
-	hosts         []dashboardHost
-	filtered      []int
-	cursor        int
-	query         string
-	filtering     bool
-	width         int
-	height        int
-	choice        dashboardSelection
-	done          bool
-	commandOpen   bool
-	commandCursor int
-	commandQuery  string
-	confirmOpen   bool
-	confirmAction dashboardSelection
-	transfer      *transferFlow
-	helpOpen      bool
-	themeOpen     bool
-	themeCursor   int
-	themeOriginal theme
-	themePreview  bool
-	themeSaving   bool
-	showTopology  bool
-	probing       bool
-	probeQueue    []string
-	probeInitial  []string
-	probeTargets  map[string]bool
-	probeTotal    int
-	probeComplete int
-	metadataBusy  map[string]bool
-	statePath     string
-	configPath    string
-	indexMode     string
-	notice        string
-	noticeError   bool
-	plain         bool
-	theme         theme
-	now           time.Time
+	hosts            []dashboardHost
+	filtered         []int
+	cursor           int
+	query            string
+	filtering        bool
+	width            int
+	height           int
+	choice           dashboardSelection
+	done             bool
+	commandOpen      bool
+	commandFiltering bool
+	commandCursor    int
+	commandQuery     string
+	confirmOpen      bool
+	confirmAction    dashboardSelection
+	commandResult    *configuredCommandResult
+	commandRunning   bool
+	commandOffset    int
+	transfer         *transferFlow
+	helpOpen         bool
+	themeOpen        bool
+	themeCursor      int
+	themeOriginal    theme
+	themePreview     bool
+	themeSaving      bool
+	showTopology     bool
+	probing          bool
+	probeQueue       []string
+	probeInitial     []string
+	probeTargets     map[string]bool
+	probeTotal       int
+	probeComplete    int
+	metadataBusy     map[string]bool
+	statePath        string
+	configPath       string
+	indexMode        string
+	notice           string
+	noticeError      bool
+	plain            bool
+	theme            theme
+	now              time.Time
 }
 
 func newDashboardModel(hosts []string) dashboardModel {
@@ -338,7 +356,7 @@ func (m dashboardModel) updateTransfer(key string) (tea.Model, tea.Cmd) {
 	}
 	flow := *m.transfer
 	switch key {
-	case "esc", "q":
+	case "esc":
 		m.transfer = nil
 		return m, nil
 	case "r":
@@ -347,14 +365,10 @@ func (m dashboardModel) updateTransfer(key string) (tea.Model, tea.Cmd) {
 			m.transfer = &flow
 			return m, m.transferScanCommand(flow.Stage)
 		}
-	case "up", "k":
+	case "k":
 		flow.Cursor = max(0, flow.Cursor-1)
-	case "down", "j":
+	case "j":
 		flow.Cursor = min(max(0, len(flow.Items)-1), flow.Cursor+1)
-	case "pgup":
-		flow.Cursor = max(0, flow.Cursor-8)
-	case "pgdown":
-		flow.Cursor = min(max(0, len(flow.Items)-1), flow.Cursor+8)
 	case "enter":
 		if flow.Err != "" || len(flow.Items) == 0 {
 			return m, nil
@@ -464,6 +478,20 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = "Theme saved as default: " + msg.Name
 		m.noticeError = false
 		return m, nil
+	case configuredCommandMsg:
+		m.commandRunning = false
+		if m.commandResult == nil {
+			return m, nil
+		}
+		m.commandResult.Output = msg.Output
+		if msg.Err != nil {
+			m.commandResult.Err = sanitizeTerminalText(msg.Err.Error())
+		} else if m.statePath != "" {
+			if err := recordHostSuccess(m.statePath, m.commandResult.Host, time.Now()); err != nil {
+				logVerbose("failed to record host activity: %v", err)
+			}
+		}
+		return m, nil
 	case transferScanMsg:
 		if m.transfer == nil || m.transfer.Stage != msg.Stage {
 			return m, nil
@@ -502,20 +530,56 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.transfer != nil {
 		return m.updateTransfer(key)
 	}
+	if m.commandResult != nil {
+		switch key {
+		case "esc":
+			m.commandResult = nil
+			m.commandOffset = 0
+		case "k":
+			if !m.commandRunning {
+				m.commandOffset = max(0, m.commandOffset-1)
+			}
+		case "j":
+			if !m.commandRunning {
+				lines := strings.Split(m.commandResult.Output, "\n")
+				m.commandOffset = min(max(0, len(lines)-1), m.commandOffset+1)
+			}
+		case "r":
+			if !m.commandRunning {
+				m.commandRunning = true
+				m.commandOffset = 0
+				m.commandResult.Output = ""
+				m.commandResult.Err = ""
+				return m, m.configuredCommandCmd(m.commandResult.Host, m.commandResult.Command.Command)
+			}
+		}
+		return m, nil
+	}
 	if m.helpOpen {
 		switch key {
-		case "?", "esc", "q", "enter":
+		case "esc":
 			m.helpOpen = false
 		}
 		return m, nil
 	}
 	if m.confirmOpen {
 		switch key {
-		case "y", "Y", "enter":
+		case "y":
+			if !m.confirmAction.Command.Interactive {
+				selection := m.confirmAction
+				m.confirmOpen = false
+				m.confirmAction = dashboardSelection{}
+				m.commandRunning = true
+				m.commandOffset = 0
+				m.commandResult = &configuredCommandResult{
+					Host: selection.Host, Command: selection.Command,
+				}
+				return m, m.configuredCommandCmd(selection.Host, selection.Command.Command)
+			}
 			m.choice = m.confirmAction
 			m.done = true
 			return m, tea.Quit
-		case "n", "N", "esc", "q":
+		case "esc":
 			m.confirmOpen = false
 			m.confirmAction = dashboardSelection{}
 		}
@@ -523,7 +587,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.showTopology {
 		switch key {
-		case "esc", "q", "t":
+		case "esc":
 			m.showTopology = false
 		}
 		return m, nil
@@ -531,13 +595,13 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.themeOpen {
 		names := themeNames()
 		switch key {
-		case "esc", "q":
+		case "esc":
 			m.theme = m.themeOriginal
 			m.themeOpen = false
-		case "up", "k", "left", "h":
+		case "k":
 			m.themeCursor = (m.themeCursor + len(names) - 1) % len(names)
 			m.theme = themes[names[m.themeCursor]]
-		case "down", "j", "right", "l":
+		case "j":
 			m.themeCursor = (m.themeCursor + 1) % len(names)
 			m.theme = themes[names[m.themeCursor]]
 		case "enter":
@@ -557,19 +621,36 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.commandOpen {
 		commands := m.filteredCommands()
 		switch key {
-		case "esc", "ctrl+k":
+		case "esc":
 			m.commandOpen = false
+			m.commandFiltering = false
 			m.commandQuery = ""
 		case "backspace":
 			runes := []rune(m.commandQuery)
-			if len(runes) > 0 {
+			if m.commandFiltering && len(runes) > 0 {
 				m.commandQuery = string(runes[:len(runes)-1])
 				m.commandCursor = 0
 			}
-		case "up", "ctrl+p":
-			m.commandCursor = max(0, m.commandCursor-1)
-		case "down", "ctrl+n":
-			m.commandCursor = min(max(0, len(commands)-1), m.commandCursor+1)
+		case "/":
+			if !m.commandFiltering {
+				m.commandFiltering = true
+				m.commandQuery = ""
+				m.commandCursor = 0
+			}
+		case "k":
+			if m.commandFiltering {
+				m.commandQuery += "k"
+				m.commandCursor = 0
+			} else {
+				m.commandCursor = max(0, m.commandCursor-1)
+			}
+		case "j":
+			if m.commandFiltering {
+				m.commandQuery += "j"
+				m.commandCursor = 0
+			} else {
+				m.commandCursor = min(max(0, len(commands)-1), m.commandCursor+1)
+			}
 		case "enter":
 			if len(commands) == 0 {
 				return m, nil
@@ -582,14 +663,36 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.startTransfer(command.Action)
 			case actionInfo:
 				m.commandOpen = false
+				m.commandFiltering = false
 				m.commandQuery = ""
 				return m.startMetadataRefresh()
+			case actionProbe:
+				m.commandOpen = false
+				m.commandFiltering = false
+				m.commandQuery = ""
+				target := m.selectedTarget()
+				if target != "" && !m.probing {
+					m, command := m.beginProbe([]string{target})
+					return m, command
+				}
+				return m, nil
+			case actionProbeAll:
+				m.commandOpen = false
+				m.commandFiltering = false
+				m.commandQuery = ""
+				if !m.probing {
+					m, command := m.beginProbe(m.allTargets())
+					return m, command
+				}
+				return m, nil
 			case actionFleet:
 				m.commandOpen = false
+				m.commandFiltering = false
 				m.showTopology = true
 				return m, nil
 			case actionThemes:
 				m.commandOpen = false
+				m.commandFiltering = false
 				m.openThemePreview()
 				return m, nil
 			case actionConfig:
@@ -605,7 +708,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m.choose(command.Action)
 		default:
-			if msg.Type == tea.KeyRunes {
+			if m.commandFiltering && msg.Type == tea.KeyRunes {
 				m.commandQuery += sanitizeTerminalText(string(msg.Runes))
 				m.commandCursor = 0
 			}
@@ -637,60 +740,24 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch key {
-	case "q", "esc":
+	case "q":
 		m.done = true
 		return m, tea.Quit
-	case "?":
+	case "h":
 		m.helpOpen = true
-	case "/", "f":
+	case "/":
 		m.filtering = true
-	case "ctrl+k", "c":
+	case "a":
 		m.commandOpen = true
+		m.commandFiltering = false
 		m.commandCursor = 0
 		m.commandQuery = ""
-	case "up", "k":
+	case "k":
 		m.moveCursor(-1)
-	case "down", "j":
+	case "j":
 		m.moveCursor(1)
-	case "pgup":
-		m.moveCursor(-max(1, m.visibleHostRows()))
-	case "pgdown":
-		m.moveCursor(max(1, m.visibleHostRows()))
-	case "home", "g":
-		m.cursor = 0
-	case "end", "G":
-		m.cursor = max(0, len(m.filtered)-1)
-	case "enter", "s":
+	case "enter":
 		return m.choose(actionSSH)
-	case "p":
-		return m.startTransfer(actionPull)
-	case "u":
-		return m.startTransfer(actionPush)
-	case "t":
-		m.showTopology = true
-	case "T":
-		m.openThemePreview()
-	case "r":
-		target := m.selectedTarget()
-		if target != "" && !m.probing {
-			m, command := m.beginProbe([]string{target})
-			return m, command
-		}
-	case "R":
-		if !m.probing {
-			m, command := m.beginProbe(m.allTargets())
-			return m, command
-		}
-	case "i":
-		return m.startMetadataRefresh()
-	case "n":
-		return m.choose(actionNet)
-	case "d":
-		return m.choose(actionStorage)
-	case "e":
-		return m.choose(actionConfig)
-	case "a":
-		return m.choose(actionConfig)
 	}
 	return m, nil
 }
@@ -712,6 +779,13 @@ func (m dashboardModel) saveThemeCommand(name string) tea.Cmd {
 	configPath := m.configPath
 	return func() tea.Msg {
 		return themeSaveMsg{Name: name, Err: saveThemeToConfig(configPath, name)}
+	}
+}
+
+func (m dashboardModel) configuredCommandCmd(host, command string) tea.Cmd {
+	return func() tea.Msg {
+		output, err := runConfiguredRemoteCommandCaptured(host, command)
+		return configuredCommandMsg{Output: output, Err: err}
 	}
 }
 
@@ -782,7 +856,7 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 	if m.selectedTarget() == "" {
 		return []dashboardCommand{
 			{Label: "Theme preview", Description: "Preview Nexus themes", Action: actionThemes},
-			{Label: "Edit config & commands", Description: "Open config.yaml with commented examples", Action: actionConfig},
+			{Label: "Edit configuration", Description: "Commands, profiles, and themes", Action: actionConfig},
 		}
 	}
 	commands := []dashboardCommand{
@@ -790,6 +864,8 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 		{"Pull files", "Download from remote", actionPull, commandConfig{}},
 		{"Push files", "Upload to remote", actionPush, commandConfig{}},
 		{"Refresh snapshot", "Scan system details in the background", actionInfo, commandConfig{}},
+		{"Check connection", "Refresh selected host reachability", actionProbe, commandConfig{}},
+		{"Check every host", "Refresh all reachability", actionProbeAll, commandConfig{}},
 		{"System monitor", "Open the best available monitor", actionTop, commandConfig{}},
 		{"Network tools", "Open remote network diagnostics", actionNet, commandConfig{}},
 		{"Storage tools", "Inspect disk usage", actionStorage, commandConfig{}},
@@ -801,7 +877,7 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 			Label: command.Name, Description: command.Description, Action: actionCustom, Command: command,
 		})
 	}
-	commands = append(commands, dashboardCommand{"Edit config & commands", "Open config.yaml with commented examples", actionConfig, commandConfig{}})
+	commands = append(commands, dashboardCommand{"Edit configuration", "Commands, profiles, and themes", actionConfig, commandConfig{}})
 	return commands
 }
 
@@ -830,6 +906,9 @@ func (m dashboardModel) View() string {
 	}
 	if m.helpOpen {
 		return fitTerminalView(m.helpView(), m.width, m.height)
+	}
+	if m.commandResult != nil {
+		return fitTerminalView(m.commandResultView(), m.width, m.height)
 	}
 	if m.transfer != nil {
 		return fitTerminalView(m.transferView(), m.width, m.height)
@@ -944,6 +1023,13 @@ func (m dashboardModel) headerView(s dashboardStyles) string {
 		status += s.muted.Render(fmt.Sprintf("  ·  probing %d/%d", m.probeComplete, m.probeTotal))
 	}
 	left := s.title.Render("◆ NEXUS") + s.muted.Render("  choose a host")
+	if m.width < 60 {
+		left = s.title.Render("◆ NEXUS")
+		status = fmt.Sprintf("%d saved · %d up", len(m.hosts), online)
+		if m.probing {
+			status = fmt.Sprintf("probing %d/%d", m.probeComplete, m.probeTotal)
+		}
+	}
 	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(status)-4)
 	return s.panel.BorderTop(false).BorderLeft(false).BorderRight(false).
 		Width(max(1, m.width-2)).Padding(0, 1).
@@ -951,12 +1037,16 @@ func (m dashboardModel) headerView(s dashboardStyles) string {
 }
 
 func (m dashboardModel) hostListView(s dashboardStyles, width, height int) string {
-	title := s.focus.Render("HOSTS")
-	filter := "/ search hosts"
+	titleText := "HOSTS"
+	if width == m.width && m.width < 72 {
+		titleText += " · j/k move"
+	}
+	title := s.focus.Render(titleText)
+	filter := "[/] find hosts"
 	if m.filtering || m.query != "" {
-		filter = "/ " + m.query
+		filter = "Find: " + m.query
 		if m.filtering {
-			filter += "█"
+			filter += "█  ·  [enter] connect  [esc] clear"
 		}
 	}
 	lines := []string{title, s.muted.Render(truncateText(filter, width-6)), ""}
@@ -988,8 +1078,11 @@ func (m dashboardModel) hostListView(s dashboardStyles, width, height int) strin
 		lines = append(lines, s.muted.Render(fmt.Sprintf("%d–%d / %d", start+1, end, len(m.filtered))))
 	}
 	content := strings.Join(lines, "\n")
-	return s.panel.BorderLeft(false).BorderTop(false).BorderBottom(false).
-		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 1).Render(content)
+	panel := s.panel.BorderLeft(false).BorderTop(false).BorderBottom(false)
+	if width == m.width && m.width < 72 {
+		panel = panel.BorderRight(false)
+	}
+	return panel.Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 1).Render(content)
 }
 
 func (m dashboardModel) hostRow(s dashboardStyles, host dashboardHost, width int, selected bool) string {
@@ -1060,7 +1153,7 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 		m.statusText(s, host.Reachability) + s.muted.Render("  ·  used "+relativeTime(host.LastUsed, m.now)),
 		"",
 	}
-	snapshotState := "not scanned · press i"
+	snapshotState := "not scanned · use Actions"
 	if m.metadataBusy[host.Target] {
 		snapshotState = "refreshing…"
 	}
@@ -1095,13 +1188,14 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 	if len(commands) == 0 {
 		lines = append(lines,
 			s.text.Render("None configured"),
-			s.muted.Render("[e] edit config · examples included"),
+			s.muted.Render("[a] configure · examples in YAML"),
 		)
 	} else {
 		for _, command := range commands {
-			lines = append(lines, s.text.Render(command.Name)+"  "+s.muted.Render(command.Description))
+			line := command.Name + "  " + command.Description
+			lines = append(lines, s.text.Render(truncateText(line, max(1, width-6))))
 		}
-		lines = append(lines, s.muted.Render("[ctrl+k] choose  ·  [e] edit config"))
+		lines = append(lines, s.muted.Render("[a] choose or edit commands"))
 	}
 	content := strings.Join(lines, "\n")
 	return s.panel.BorderLeft(false).BorderTop(false).BorderRight(false).BorderBottom(false).
@@ -1109,35 +1203,25 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 }
 
 func (m dashboardModel) compactView(s dashboardStyles, width, height int) string {
-	listHeight := max(5, height-5)
-	list := m.hostListView(s, width, listHeight)
-	host := m.selectedHost()
-	summary := "enter connect  / search  c commands  ? help"
-	if host.Target != "" && height >= 12 {
-		summary = s.focus.Render(displayName(host)) + "  " + m.statusText(s, host.Reachability) + "\n" +
-			s.muted.Render(truncateText(host.Target+"  "+valueOr(host.OS, "system info not cached"), width-4))
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, list, s.panel.BorderBottom(false).BorderLeft(false).BorderRight(false).
-		Width(max(1, width-2)).Padding(0, 1).Render(summary))
+	return m.hostListView(s, width, height)
 }
 
 func (m dashboardModel) footerView(s dashboardStyles) string {
 	hints := strings.Join([]string{
 		keyHint(s, "enter", "connect"),
+		keyHint(s, "j/k", "move"),
 		keyHint(s, "/", "find"),
-		keyHint(s, "ctrl+k", "actions"),
-		keyHint(s, "?", "help"),
+		keyHint(s, "a", "actions"),
 	}, "  ")
 	if m.width < 72 {
-		hints = strings.Join([]string{
-			keyHint(s, "enter", "connect"),
-			keyHint(s, "/", "find"),
-			keyHint(s, "c", "actions"),
-		}, " ")
+		hints = "enter · j/k · / find · a actions · h keys"
+		if m.width < 48 {
+			hints = "enter connect · a actions · h keys"
+		}
 	}
 	right := ""
 	if m.themePreview {
-		right = "preview: " + m.theme.Name + " · press e to save"
+		right = "session theme: " + m.theme.Name
 	}
 	for target := range m.metadataBusy {
 		right = "◌ refreshing " + truncateText(target, 24)
@@ -1150,11 +1234,19 @@ func (m dashboardModel) footerView(s dashboardStyles) string {
 			right = s.success.Render("✓ " + truncateText(m.notice, max(18, m.width/2)))
 		}
 	}
-	if right == "" && m.probing {
+	if right == "" && m.probing && m.width >= 72 {
 		right = fmt.Sprintf("◌ probing %d/%d", m.probeComplete, m.probeTotal)
 	}
-	if right == "" {
-		right = m.theme.Name + " · [T] theme"
+	if right == "" && m.width >= 72 {
+		right = "[h] all keys"
+	}
+	if m.width < 72 {
+		content := s.muted.Render(hints)
+		if right != "" {
+			content = ansi.Truncate(right, max(1, m.width-4), "…")
+		}
+		return s.panel.BorderBottom(false).BorderLeft(false).BorderRight(false).
+			Width(max(1, m.width-2)).Padding(0, 1).Render(content)
 	}
 	right = ansi.Truncate(right, max(1, m.width-lipgloss.Width(hints)-5), "…")
 	gap := max(1, m.width-lipgloss.Width(hints)-lipgloss.Width(right)-4)
@@ -1171,11 +1263,9 @@ func (m dashboardModel) commandPaletteView() string {
 	s := m.styles()
 	commands := m.filteredCommands()
 	width := min(max(38, m.width-12), 74)
-	search := "/ " + m.commandQuery
-	if m.commandQuery == "" {
-		search = "/ filter actions"
-	} else {
-		search += "█"
+	search := "[/] filter actions  ·  [j/k] move"
+	if m.commandFiltering {
+		search = "Filter: " + m.commandQuery + "█"
 	}
 	context := valueOr(displayName(m.selectedHost()), "Nexus")
 	if target := m.selectedTarget(); target != "" {
@@ -1196,15 +1286,26 @@ func (m dashboardModel) commandPaletteView() string {
 	}
 	for i := start; i < end; i++ {
 		command := commands[i]
-		line := fmt.Sprintf("%-20s %s", truncateText(command.Label, 19), truncateText(command.Description, width-25))
+		rowWidth := max(12, width-8)
+		labelWidth := min(20, max(8, rowWidth/3))
+		descriptionWidth := max(1, rowWidth-labelWidth-1)
+		line := fmt.Sprintf("%-*s %s",
+			labelWidth,
+			truncateText(command.Label, labelWidth),
+			truncateText(command.Description, descriptionWidth),
+		)
 		if i == m.commandCursor {
-			line = s.selected.Render("› " + padCell(line, width-4))
+			line = s.selected.Render("› " + padCell(line, rowWidth))
 		} else {
 			line = "  " + s.text.Render(line)
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "", s.muted.Render("[enter] choose   [esc] close   saved commands confirm before running"))
+	footer := "[enter] choose   [esc] close   saved commands always confirm"
+	if m.commandFiltering {
+		footer = "[enter] choose first match   [backspace] edit   [esc] close"
+	}
+	lines = append(lines, "", s.muted.Render(footer))
 	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
 }
@@ -1237,7 +1338,7 @@ func (m dashboardModel) themePreviewView() string {
 		"",
 		s.live.Render("● online")+"  "+s.warning.Render("! refused")+"  "+s.failure.Render("× unavailable")+"  "+s.focus.Render("◆ focus"),
 		"",
-		s.muted.Render("[↑↓] preview   [enter] use once   [s] save default"),
+		s.muted.Render("[j/k] preview   [enter] use once   [s] save default"),
 		s.muted.Render("[esc] restore previous theme"),
 	)
 	if m.themeSaving {
@@ -1270,7 +1371,7 @@ func (m dashboardModel) fleetView() string {
 	if len(m.hosts) == 0 {
 		lines = append(lines, s.muted.Render("No saved endpoints yet."))
 	}
-	lines = append(lines, "", s.muted.Render("[r] refresh selected from workspace   [esc] back"))
+	lines = append(lines, "", s.muted.Render("[esc] back   ·   refresh connections from Actions"))
 	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
 }
@@ -1337,7 +1438,7 @@ func (m dashboardModel) transferView() string {
 			}
 			lines = append(lines, line)
 		}
-		lines = append(lines, "", s.muted.Render("[enter] choose   [↑↓] move   [esc] cancel"))
+		lines = append(lines, "", s.muted.Render("[j/k] move   [enter] choose   [esc] cancel"))
 	}
 	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
@@ -1378,7 +1479,53 @@ func (m dashboardModel) confirmCommandView() string {
 		"",
 		s.warning.Render("This command runs on the remote host with your SSH access."),
 		"",
-		s.text.Render("[y/enter] run") + s.muted.Render("   [n/esc] cancel"),
+		s.text.Render("[y] run") + s.muted.Render("   [esc] cancel"),
+	}
+	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+}
+
+func (m dashboardModel) commandResultView() string {
+	s := m.styles()
+	result := m.commandResult
+	if result == nil {
+		return ""
+	}
+	width := min(max(48, m.width-12), 88)
+	lines := []string{
+		s.focus.Render("COMMAND OUTPUT"),
+		s.text.Render(result.Command.Name) + s.muted.Render("  ·  "+result.Host),
+		"",
+	}
+	if m.commandRunning {
+		lines = append(lines,
+			s.live.Render("◌ Running on the remote host…"),
+			"",
+			s.muted.Render("[esc] hide output"),
+		)
+	} else {
+		status := s.success.Render("✓ Finished")
+		if result.Err != "" {
+			status = s.failure.Render("× " + result.Err)
+		}
+		lines = append(lines, status, "")
+		output := result.Output
+		if strings.TrimSpace(output) == "" {
+			output = "(command completed without output)"
+		}
+		outputLines := strings.Split(output, "\n")
+		maxRows := max(1, m.height-10)
+		maxOffset := max(0, len(outputLines)-maxRows)
+		offset := min(m.commandOffset, maxOffset)
+		end := min(len(outputLines), offset+maxRows)
+		for _, line := range outputLines[offset:end] {
+			lines = append(lines, s.text.Render(truncateText(line, width-6)))
+		}
+		position := ""
+		if len(outputLines) > maxRows {
+			position = fmt.Sprintf("   %d–%d / %d", offset+1, end, len(outputLines))
+		}
+		lines = append(lines, "", s.muted.Render("[j/k] scroll   [r] run again   [esc] back"+position))
 	}
 	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
@@ -1399,18 +1546,16 @@ func themeSwatch(t theme, plain bool) string {
 
 func (m dashboardModel) helpView() string {
 	s := m.styles()
-	if m.height < 22 {
+	if m.height < 22 || m.width < 60 {
 		compact := []string{
 			s.focus.Render("NEXUS KEYS"),
 			"",
-			"enter  connect      /  find",
-			"j/k    move         c  actions",
-			"p/u    transfer     i  refresh info",
-			"r      probe host   t  fleet",
-			"T      themes       e  edit config",
+			"j/k move        enter connect",
+			"/ find          a actions",
+			"h keys          q quit",
 			"",
-			"● online  ! refused  × unavailable",
-			s.muted.Render("esc close"),
+			"lists: j/k move · enter choose",
+			s.muted.Render("esc always goes back"),
 		}
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 			s.panel.Padding(1, 2).Render(strings.Join(compact, "\n")))
@@ -1418,19 +1563,20 @@ func (m dashboardModel) helpView() string {
 	help := []string{
 		s.focus.Render("NEXUS KEYS"),
 		"",
-		"enter / s     connect with SSH",
-		"j/k or ↑/↓   move selection",
-		"g/G          first / last host",
-		"/            search hosts",
-		"ctrl+k / c   command palette",
-		"p / u        pull / push",
-		"i            refresh snapshot in background",
-		"n / d        network / storage tools",
-		"r / R        probe selected / all hosts",
-		"t            open fleet overview",
-		"T            preview or save a theme",
-		"e / a        edit YAML config and saved commands",
-		"? / esc      close help",
+		s.focus.Render("WORKSPACE"),
+		"j / k        move between hosts",
+		"enter        connect with SSH",
+		"/            find hosts",
+		"a            all actions and saved commands",
+		"h            open this key reference",
+		"q            quit Nexus",
+		"",
+		"LISTS         j/k move · enter choose · esc back",
+		"ACTION FILTER / start · backspace edit · enter first match",
+		"THEME         s save default",
+		"FAILED SCAN   r retry",
+		"OUTPUT        r run again",
+		"CONFIRM       y run · esc cancel",
 		"",
 		"● online   ! refused   × unavailable   ◌ checking",
 	}
@@ -1442,12 +1588,12 @@ func (m dashboardModel) tinyView() string {
 	if m.selectedTarget() == "" {
 		return "NEXUS — add a host with nexus host add user@host[:port]\n"
 	}
-	return truncateText("NEXUS › "+m.selectedTarget()+" — enter connect · q quit", max(1, m.width)) + "\n"
+	return truncateText("NEXUS › "+m.selectedTarget()+" — enter connect · h keys", max(1, m.width)) + "\n"
 }
 
 func (m dashboardModel) shortView() string {
 	s := m.styles()
-	lines := []string{s.title.Render(truncateText("◆ NEXUS  / search · enter connect", m.width))}
+	lines := []string{s.title.Render(truncateText("◆ NEXUS  j/k move · enter connect · a actions", m.width))}
 	rows := max(1, m.height-2)
 	start := 0
 	if m.cursor >= rows {
@@ -1470,7 +1616,7 @@ func (m dashboardModel) shortView() string {
 	for len(lines) < m.height-1 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, truncateText("c commands · ? help · q quit", m.width))
+	lines = append(lines, truncateText("a actions · h all keys · q quit", m.width))
 	return strings.Join(lines[:m.height], "\n")
 }
 
@@ -1504,10 +1650,6 @@ func plainReachability(result reachabilityResult, probing bool) string {
 		}
 		return "○ unknown"
 	}
-}
-
-func (m dashboardModel) visibleHostRows() int {
-	return max(1, (m.height-10)/3)
 }
 
 func displayName(host dashboardHost) string {
@@ -1745,6 +1887,59 @@ func runConfiguredRemoteCommand(target, command string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+type cappedCommandOutput struct {
+	builder   strings.Builder
+	limit     int
+	truncated bool
+}
+
+func (output *cappedCommandOutput) Write(chunk []byte) (int, error) {
+	size := len(chunk)
+	remaining := max(0, output.limit-output.builder.Len())
+	if remaining < size {
+		output.truncated = true
+	}
+	if remaining > 0 {
+		_, _ = output.builder.Write(chunk[:min(size, remaining)])
+	}
+	return size, nil
+}
+
+func (output *cappedCommandOutput) String() string {
+	value := sanitizeCommandOutput(output.builder.String())
+	if output.truncated {
+		value = strings.TrimRight(value, "\n") + "\n… output truncated"
+	}
+	return value
+}
+
+func runConfiguredRemoteCommandCaptured(target, command string) (string, error) {
+	if command = sanitizeCommandText(command); command == "" {
+		return "", errors.New("configured command is empty or contains unsafe control characters")
+	}
+	remote := remoteShellCommand("sh", command)
+	cmd, err := buildSSHCommand(context.Background(), target, false, remote)
+	if err != nil {
+		return "", err
+	}
+	output := &cappedCommandOutput{limit: 64 * 1024}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err = cmd.Run()
+	return output.String(), err
+}
+
+func sanitizeCommandOutput(value string) string {
+	value = ansiCSI.ReplaceAllString(value, "")
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	lines := strings.Split(value, "\n")
+	for index := range lines {
+		lines[index] = sanitizeTerminalText(lines[index])
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func (a *app) newRunCmd() *cobra.Command {

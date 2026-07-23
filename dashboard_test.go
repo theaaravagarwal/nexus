@@ -11,6 +11,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+func chooseDashboardAction(t *testing.T, model dashboardModel, query string) (dashboardModel, tea.Cmd) {
+	t.Helper()
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(query)})
+	model = updated.(dashboardModel)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return updated.(dashboardModel), cmd
+}
+
 func TestDashboardFiltersAndChoosesAction(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one", "bob@two:2222"})
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
@@ -27,32 +39,30 @@ func TestDashboardFiltersAndChoosesAction(t *testing.T) {
 	}
 }
 
-func TestDashboardDirectActionsDispatchExpectedCommands(t *testing.T) {
+func TestDashboardActionListDispatchesExpectedCommands(t *testing.T) {
 	tests := []struct {
-		key    rune
+		query  string
 		action dashboardAction
 	}{
-		{'n', actionNet},
-		{'d', actionStorage},
+		{"network", actionNet},
+		{"storage", actionStorage},
 	}
 	for _, tc := range tests {
 		model := newDashboardModel([]string{"alice@one:2222"})
-		updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tc.key}})
-		got := updated.(dashboardModel)
+		got, cmd := chooseDashboardAction(t, model, tc.query)
 		if cmd == nil || got.choice.Action != tc.action || got.choice.Host != "alice@one:2222" {
-			t.Fatalf("key=%q choice=%#v cmd=%v", tc.key, got.choice, cmd)
+			t.Fatalf("query=%q choice=%#v cmd=%v", tc.query, got.choice, cmd)
 		}
 	}
 }
 
 func TestDashboardTransferDiscoveryStaysInsideTUI(t *testing.T) {
 	pull := newDashboardModel([]string{"alice@one:2222"})
-	updated, cmd := pull.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-	pull = updated.(dashboardModel)
+	pull, cmd := chooseDashboardAction(t, pull, "pull files")
 	if cmd == nil || pull.transfer == nil || pull.transfer.Stage != transferScanRemoteSource || pull.done {
 		t.Fatalf("pull scan escaped TUI: cmd=%v model=%#v", cmd, pull)
 	}
-	updated, _ = pull.Update(transferScanMsg{Stage: transferScanRemoteSource, Items: []string{"projects/", "notes.txt"}})
+	updated, _ := pull.Update(transferScanMsg{Stage: transferScanRemoteSource, Items: []string{"projects/", "notes.txt"}})
 	pull = updated.(dashboardModel)
 	if pull.transfer.Stage != transferPickRemoteSource || !strings.Contains(pull.View(), "Choose what to download") {
 		t.Fatalf("pull picker unavailable: %#v\n%s", pull.transfer, pull.View())
@@ -64,8 +74,7 @@ func TestDashboardTransferDiscoveryStaysInsideTUI(t *testing.T) {
 	}
 
 	push := newDashboardModel([]string{"alice@one:2222"})
-	updated, cmd = push.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
-	push = updated.(dashboardModel)
+	push, cmd = chooseDashboardAction(t, push, "push files")
 	if cmd == nil || push.transfer == nil || push.transfer.Stage != transferScanLocalSource || push.done {
 		t.Fatalf("push local scan escaped TUI: cmd=%v model=%#v", cmd, push)
 	}
@@ -87,8 +96,7 @@ func TestDashboardTransferDiscoveryStaysInsideTUI(t *testing.T) {
 
 func TestDashboardSystemRefreshStaysInsideTUI(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one:2222"})
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-	got := updated.(dashboardModel)
+	got, cmd := chooseDashboardAction(t, model, "refresh snapshot")
 	if cmd == nil || got.done || got.choice.Action != "" || !got.metadataBusy["alice@one:2222"] {
 		t.Fatalf("refresh escaped TUI: choice=%#v done=%v busy=%v cmd=%v", got.choice, got.done, got.metadataBusy, cmd)
 	}
@@ -114,10 +122,9 @@ func TestDashboardProbeResultsStreamPerHost(t *testing.T) {
 	}
 }
 
-func TestDashboardSavedCommandShortcutOpensConfig(t *testing.T) {
+func TestDashboardConfigIsDiscoverableFromActions(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	model = updated.(dashboardModel)
+	model, cmd := chooseDashboardAction(t, model, "edit config")
 	if cmd == nil || !model.done || model.choice.Action != actionConfig {
 		t.Fatalf("saved-command shortcut did not open config: cmd=%v model=%#v", cmd, model)
 	}
@@ -137,12 +144,12 @@ func TestDashboardSavedCommandConfirmationStaysInContext(t *testing.T) {
 	if cmd != nil || !model.confirmOpen || model.done {
 		t.Fatalf("confirmation escaped TUI: cmd=%v model=%#v", cmd, model)
 	}
-	for _, want := range []string{"CONFIRM SAVED COMMAND", "alice@one", "uptime", "[y/enter] run"} {
+	for _, want := range []string{"CONFIRM SAVED COMMAND", "alice@one", "uptime", "[y] run"} {
 		if !strings.Contains(model.View(), want) {
 			t.Fatalf("confirmation missing %q:\n%s", want, model.View())
 		}
 	}
-	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = updated.(dashboardModel)
 	if cmd != nil || model.confirmOpen || model.done {
 		t.Fatalf("confirmation did not cancel in place: cmd=%v model=%#v", cmd, model)
@@ -151,11 +158,13 @@ func TestDashboardSavedCommandConfirmationStaysInContext(t *testing.T) {
 
 func TestDashboardNavigationAndCommandFilter(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	model = updated.(dashboardModel)
 	if !model.commandOpen {
 		t.Fatal("command key did not open palette")
 	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = updated.(dashboardModel)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("storage")})
 	model = updated.(dashboardModel)
 	commands := model.filteredCommands()
@@ -164,19 +173,143 @@ func TestDashboardNavigationAndCommandFilter(t *testing.T) {
 	}
 }
 
+func TestDashboardUsesOneCanonicalWorkspaceKeyMap(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one", "bob@two"})
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'?'}},
+		{Type: tea.KeyRunes, Runes: []rune{'c'}},
+		{Type: tea.KeyCtrlK},
+		{Type: tea.KeyRunes, Runes: []rune{'p'}},
+		{Type: tea.KeyRunes, Runes: []rune{'u'}},
+		{Type: tea.KeyRunes, Runes: []rune{'t'}},
+		{Type: tea.KeyRunes, Runes: []rune{'T'}},
+		{Type: tea.KeyRunes, Runes: []rune{'i'}},
+		{Type: tea.KeyRunes, Runes: []rune{'e'}},
+		{Type: tea.KeyDown},
+		{Type: tea.KeyUp},
+	} {
+		updated, cmd := model.Update(key)
+		model = updated.(dashboardModel)
+		if cmd != nil || model.done || model.commandOpen || model.helpOpen || model.transfer != nil ||
+			model.themeOpen || model.showTopology || model.cursor != 0 {
+			t.Fatalf("legacy key %q still changes the workspace: cmd=%v model=%#v", key.String(), cmd, model)
+		}
+	}
+
+	for _, want := range []string{
+		"j / k        move between hosts",
+		"a            all actions and saved commands",
+		"LISTS         j/k move · enter choose · esc back",
+		"THEME         s save default",
+		"OUTPUT        r run again",
+		"CONFIRM       y run · esc cancel",
+	} {
+		model.helpOpen = true
+		if !strings.Contains(model.View(), want) {
+			t.Fatalf("key reference missing %q:\n%s", want, model.View())
+		}
+	}
+}
+
+func TestDashboardActionListExposesEveryOperation(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	actions := map[dashboardAction]bool{}
+	for _, command := range model.availableCommands() {
+		actions[command.Action] = true
+	}
+	for _, action := range []dashboardAction{
+		actionSSH, actionPull, actionPush, actionInfo, actionProbe, actionProbeAll,
+		actionTop, actionNet, actionStorage, actionFleet, actionThemes, actionConfig,
+	} {
+		if !actions[action] {
+			t.Fatalf("action %q is not discoverable from Actions", action)
+		}
+	}
+}
+
+func TestDashboardConnectionChecksRunFromActions(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one", "bob@two"})
+	model.probing = false
+	model.probeInitial = nil
+	model.probeTargets = map[string]bool{}
+	model, cmd := chooseDashboardAction(t, model, "check connection")
+	if cmd == nil || !model.probing || model.probeTotal != 1 {
+		t.Fatalf("selected connection check did not start: cmd=%v model=%#v", cmd, model)
+	}
+
+	model.probing = false
+	model.probeInitial = nil
+	model.probeTargets = map[string]bool{}
+	model, cmd = chooseDashboardAction(t, model, "check every")
+	if cmd == nil || !model.probing || model.probeTotal != 2 {
+		t.Fatalf("all connection check did not start: cmd=%v model=%#v", cmd, model)
+	}
+}
+
+func TestDashboardSavedCommandOutputStaysInsideNexus(t *testing.T) {
+	binDir := t.TempDir()
+	sshPath := filepath.Join(binDir, "ssh")
+	script := "#!/bin/sh\nprintf '\\033[31mdev: 1 windows\\033[0m\\nwork: 2 windows\\n'\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.confirmOpen = true
+	model.confirmAction = dashboardSelection{
+		Action: actionCustom,
+		Host:   "alice@one",
+		Command: commandConfig{
+			Name: "tmux list", Command: "tmux ls",
+		},
+	}
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	model = updated.(dashboardModel)
+	if cmd == nil || model.done || !model.commandRunning || model.commandResult == nil {
+		t.Fatalf("saved command left Nexus: cmd=%v model=%#v", cmd, model)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(dashboardModel)
+	view := model.View()
+	for _, want := range []string{"COMMAND OUTPUT", "tmux list", "dev: 1 windows", "work: 2 windows", "[r] run again"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("command result missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "\x1b[31m") {
+		t.Fatalf("remote terminal control sequence reached the TUI:\n%q", view)
+	}
+	if strings.Contains(view, "[31m") || strings.Contains(view, "[0m") {
+		t.Fatalf("remote ANSI fragments reached the TUI:\n%q", view)
+	}
+}
+
+func TestDashboardInteractiveSavedCommandTemporarilyOwnsTerminal(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.confirmOpen = true
+	model.confirmAction = dashboardSelection{
+		Action: actionCustom,
+		Host:   "alice@one",
+		Command: commandConfig{
+			Name: "tmux attach", Command: "tmux attach", Interactive: true,
+		},
+	}
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.done || model.choice.Action != actionCustom || model.commandResult != nil {
+		t.Fatalf("interactive saved command did not hand off the terminal: cmd=%v model=%#v", cmd, model)
+	}
+}
+
 func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	model = updated.(dashboardModel)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("theme")})
-	model = updated.(dashboardModel)
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = updated.(dashboardModel)
+	model, cmd := chooseDashboardAction(t, model, "theme")
 	if cmd != nil || !model.themeOpen {
 		t.Fatalf("theme preview did not open in TUI: cmd=%v model=%#v", cmd, model)
 	}
 	before := model.theme.Name
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	model = updated.(dashboardModel)
 	if model.theme.Name == before {
 		t.Fatal("theme preview did not advance")
@@ -200,12 +333,11 @@ func TestDashboardThemeShortcutSavesDefaultInsideTUI(t *testing.T) {
 	}
 	model := newDashboardModel([]string{"alice@one"})
 	model.configPath = configPath
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
-	model = updated.(dashboardModel)
+	model, cmd := chooseDashboardAction(t, model, "theme")
 	if cmd != nil || !model.themeOpen {
-		t.Fatalf("T did not open themes: cmd=%v model=%#v", cmd, model)
+		t.Fatalf("theme action did not open themes: cmd=%v model=%#v", cmd, model)
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	model = updated.(dashboardModel)
 	selected := model.theme.Name
 	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
@@ -257,13 +389,12 @@ func TestDashboardTopologyToggleChangesWideWorkspace(t *testing.T) {
 	if view := model.View(); strings.Contains(view, "FLEET") {
 		t.Fatalf("fleet should use progressive disclosure:\n%s", view)
 	}
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	model = updated.(dashboardModel)
+	model, _ = chooseDashboardAction(t, model, "fleet")
 	view := model.View()
 	if !strings.Contains(view, "FLEET") || !strings.Contains(view, "Saved endpoints") {
 		t.Fatalf("fleet overlay did not open:\n%s", view)
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = updated.(dashboardModel)
 	if strings.Contains(model.View(), "Saved endpoints ·") {
 		t.Fatal("fleet overlay did not close")
@@ -330,7 +461,7 @@ func TestDashboardRenderStaysWithinTerminalBounds(t *testing.T) {
 
 func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 	for _, size := range [][2]int{{40, 16}, {72, 20}, {120, 32}} {
-		for _, overlay := range []string{"help", "commands", "themes", "confirm", "fleet", "transfer"} {
+		for _, overlay := range []string{"help", "commands", "themes", "confirm", "output", "fleet", "transfer"} {
 			model := newDashboardModel([]string{"alice@one"})
 			model.width, model.height = size[0], size[1]
 			switch overlay {
@@ -345,6 +476,14 @@ func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 				model.confirmAction = dashboardSelection{
 					Action: actionCustom, Host: "alice@one",
 					Command: commandConfig{Name: "uptime", Command: "uptime"},
+				}
+			case "output":
+				model.commandResult = &configuredCommandResult{
+					Host: "alice@one",
+					Command: commandConfig{
+						Name: "tmux list", Command: "tmux ls",
+					},
+					Output: "dev: 1 windows\nwork: 2 windows",
 				}
 			case "fleet":
 				model.showTopology = true
@@ -390,7 +529,7 @@ func TestDashboardInteractionStateMatrix(t *testing.T) {
 		t.Fatalf("window size not applied: %dx%d", model.width, model.height)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	model = updated.(dashboardModel)
 	if !model.helpOpen {
 		t.Fatal("help did not open")
@@ -402,15 +541,8 @@ func TestDashboardInteractionStateMatrix(t *testing.T) {
 	}
 
 	for _, key := range []tea.KeyMsg{
-		{Type: tea.KeyTab},
-		{Type: tea.KeyShiftTab},
-		{Type: tea.KeyRight},
-		{Type: tea.KeyLeft},
-		{Type: tea.KeyDown},
-		{Type: tea.KeyPgDown},
-		{Type: tea.KeyPgUp},
-		{Type: tea.KeyEnd},
-		{Type: tea.KeyHome},
+		{Type: tea.KeyRunes, Runes: []rune{'j'}},
+		{Type: tea.KeyRunes, Runes: []rune{'k'}},
 	} {
 		updated, _ = model.Update(key)
 		model = updated.(dashboardModel)
@@ -431,7 +563,9 @@ func TestDashboardInteractionStateMatrix(t *testing.T) {
 		t.Fatalf("search cancellation did not reset: %#v", model)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	model = updated.(dashboardModel)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("net")})
 	model = updated.(dashboardModel)
@@ -448,7 +582,7 @@ func TestDashboardInteractionStateMatrix(t *testing.T) {
 
 	model.openThemePreview()
 	original := model.theme.Name
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	model = updated.(dashboardModel)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = updated.(dashboardModel)

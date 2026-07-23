@@ -52,6 +52,26 @@ func TestCommandsForTargetOverrideGlobalTagAndHost(t *testing.T) {
 	}
 }
 
+func TestCommandConfigSupportsInteractiveTerminalOwnership(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `commands:
+  - name: tmux attach
+    description: Attach to tmux
+    command: tmux attach
+    interactive: true
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Commands) != 1 || !cfg.Commands[0].Interactive {
+		t.Fatalf("interactive command was not preserved: %#v", cfg.Commands)
+	}
+}
+
 func TestEnsureConfigFileUsesPrivatePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nexus", "config.yaml")
 	if err := ensureConfigFile(path); err != nil {
@@ -83,6 +103,9 @@ func TestEnsureConfigFileAddsExamplesToExistingConfigOnce(t *testing.T) {
 	}
 	if count := strings.Count(string(raw), "# Saved command examples"); count != 1 {
 		t.Fatalf("example marker count=%d:\n%s", count, raw)
+	}
+	if count := strings.Count(string(raw), "# Add interactive: true"); count != 1 {
+		t.Fatalf("interactive note count=%d:\n%s", count, raw)
 	}
 	cfg, err := loadAppConfig(path)
 	if err != nil {
@@ -137,7 +160,7 @@ commands:
 
 func TestDefaultConfigIncludesSavedCommandExamples(t *testing.T) {
 	config := defaultConfigYAML()
-	for _, want := range []string{"press T", "disk usage", "journalctl -u app", "exact user@host:port"} {
+	for _, want := range []string{"choose Theme preview", "disk usage", "journalctl -u app", "exact user@host:port"} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("default config missing %q", want)
 		}

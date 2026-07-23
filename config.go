@@ -16,6 +16,7 @@ type commandConfig struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 	Command     string `yaml:"command"`
+	Interactive bool   `yaml:"interactive,omitempty"`
 }
 
 type uiConfig struct {
@@ -100,7 +101,7 @@ func ensureConfigFile(configPath string) error {
 func defaultConfigYAML() string {
 	return `# Nexus settings
 # Open this file with: nexus config
-# In the TUI, press T to preview or save a theme.
+# In the TUI, press a and choose Theme preview.
 
 full_index_depth: 5
 
@@ -162,6 +163,7 @@ const savedCommandExamplesYAML = `
 #
 # Put a commands list inside one host_profiles entry to limit commands to that
 # exact user@host:port. Nexus displays the exact command and asks before running.
+# Add interactive: true only for terminal-owning commands such as tmux attach.
 `
 
 func ensureSavedCommandExamples(configPath string) error {
@@ -169,11 +171,17 @@ func ensureSavedCommandExamples(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read config file %s: %w", configPath, err)
 	}
-	if bytes.Contains(raw, []byte("# Saved command examples")) {
+	hasExamples := bytes.Contains(raw, []byte("# Saved command examples"))
+	hasInteractiveNote := bytes.Contains(raw, []byte("# Add interactive: true"))
+	if hasExamples && hasInteractiveNote {
 		return nil
 	}
 	raw = bytes.TrimRight(raw, "\r\n")
-	raw = append(raw, []byte("\n"+savedCommandExamplesYAML)...)
+	if !hasExamples {
+		raw = append(raw, []byte("\n"+savedCommandExamplesYAML)...)
+	} else {
+		raw = append(raw, []byte("\n# Add interactive: true only for terminal-owning commands such as tmux attach.\n")...)
+	}
 	if err := atomicWritePrivate(configPath, raw); err != nil {
 		return fmt.Errorf("failed to add saved-command examples: %w", err)
 	}
