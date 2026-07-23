@@ -24,6 +24,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Nexus configuration and state files use private permissions, atomic locked updates, strict YAML fields, and terminal-control sanitization.
 - Remote diagnostics avoid login-shell startup files and use portable system and network summaries when optional probe utilities are unavailable.
 - Interactive SSH sessions distinguish remote shell exit codes from connection failures.
+- CLI validation now rejects unsupported indexing modes, explicit out-of-range ports, and stray command arguments instead of silently accepting them.
 
 ## [0.1.0] - 2026-07-23
 

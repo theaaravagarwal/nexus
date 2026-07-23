@@ -199,3 +199,100 @@ func TestDashboardEmptyDoesNotChoose(t *testing.T) {
 		t.Fatalf("empty dashboard chose %#v", got.choice)
 	}
 }
+
+func TestDashboardInteractionStateMatrix(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one", "bob@two", "carol@three"})
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(dashboardModel)
+	if model.width != 100 || model.height != 30 {
+		t.Fatalf("window size not applied: %dx%d", model.width, model.height)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	model = updated.(dashboardModel)
+	if !model.helpOpen {
+		t.Fatal("help did not open")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(dashboardModel)
+	if model.helpOpen {
+		t.Fatal("help did not close")
+	}
+
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyTab},
+		{Type: tea.KeyShiftTab},
+		{Type: tea.KeyRight},
+		{Type: tea.KeyLeft},
+		{Type: tea.KeyDown},
+		{Type: tea.KeyPgDown},
+		{Type: tea.KeyPgUp},
+		{Type: tea.KeyEnd},
+		{Type: tea.KeyHome},
+	} {
+		updated, _ = model.Update(key)
+		model = updated.(dashboardModel)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("bob")})
+	model = updated.(dashboardModel)
+	if len(model.filtered) != 1 {
+		t.Fatalf("search did not filter: %v", model.filtered)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(dashboardModel)
+	if model.filtering || model.query != "" || len(model.filtered) != 3 {
+		t.Fatalf("search cancellation did not reset: %#v", model)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("net")})
+	model = updated.(dashboardModel)
+	if !model.commandOpen || len(model.filteredCommands()) == 0 {
+		t.Fatal("command palette filtering failed")
+	}
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyDown}, {Type: tea.KeyUp}, {Type: tea.KeyBackspace}, {Type: tea.KeyEsc}} {
+		updated, _ = model.Update(key)
+		model = updated.(dashboardModel)
+	}
+	if model.commandOpen || model.commandQuery != "" {
+		t.Fatal("command palette did not close cleanly")
+	}
+
+	model.openThemePreview()
+	original := model.theme.Name
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(dashboardModel)
+	if model.themeOpen || model.theme.Name != original {
+		t.Fatalf("theme cancellation did not restore %q: %#v", original, model.theme)
+	}
+
+	batch := probeBatchMsg{
+		{Target: "alice@one", Status: reachOnline, Latency: time.Millisecond},
+		{Target: "bob@two", Status: reachRefused},
+	}
+	updated, cmd := model.Update(batch)
+	model = updated.(dashboardModel)
+	if model.probing || cmd == nil || model.hosts[0].Reachability.Status != reachOnline || model.hosts[1].Reachability.Status != reachRefused {
+		t.Fatalf("probe batch was not applied: %#v cmd=%v", model.hosts, cmd)
+	}
+	updated, cmd = model.Update(probeTickMsg{})
+	model = updated.(dashboardModel)
+	if !model.probing || cmd == nil {
+		t.Fatalf("probe refresh did not start: probing=%v cmd=%v", model.probing, cmd)
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	model = updated.(dashboardModel)
+	if !model.done || cmd == nil {
+		t.Fatalf("ctrl+c did not quit: done=%v cmd=%v", model.done, cmd)
+	}
+}

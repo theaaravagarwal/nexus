@@ -85,6 +85,9 @@ func (a *app) newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Args:          cobra.NoArgs,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if err := a.validateGlobalOptions(cmd); err != nil {
+				return err
+			}
 			if cmd.Annotations["skip-bootstrap"] == "true" {
 				return nil
 			}
@@ -132,6 +135,19 @@ func (a *app) newRootCmd() *cobra.Command {
 	installHelp(root, a)
 
 	return root
+}
+
+func (a *app) validateGlobalOptions(cmd *cobra.Command) error {
+	portExplicitlySet := cmd != nil && cmd.Root().PersistentFlags().Changed("port")
+	if a.sshPort < 0 || a.sshPort > 65535 || (portExplicitlySet && a.sshPort == 0) {
+		return validationErr("SSH port must be a number from 1 to 65535")
+	}
+	switch strings.ToLower(strings.TrimSpace(a.remoteIndex)) {
+	case "lazy", "full":
+		return nil
+	default:
+		return validationErr("indexing mode must be lazy or full")
+	}
 }
 
 func (a *app) ensureBootstrap() error {
@@ -1399,6 +1415,7 @@ func (a *app) newHostCmd() *cobra.Command {
 	hostCmd.AddCommand(&cobra.Command{
 		Use:   "list",
 		Short: "List known hosts",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hosts, err := a.readHosts()
 			if err != nil {
