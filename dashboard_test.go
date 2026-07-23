@@ -20,7 +20,7 @@ func TestDashboardFiltersAndChoosesAction(t *testing.T) {
 	}
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(dashboardModel)
-	if cmd == nil || model.choice != (dashboardSelection{Action: actionSSH, Host: "bob@two:2222"}) {
+	if cmd == nil || model.choice.Action != actionSSH || model.choice.Host != "bob@two:2222" {
 		t.Fatalf("choice=%#v cmd=%v", model.choice, cmd)
 	}
 }
@@ -30,8 +30,6 @@ func TestDashboardDirectActionsDispatchExpectedCommands(t *testing.T) {
 		key    rune
 		action dashboardAction
 	}{
-		{'p', actionPull},
-		{'u', actionPush},
 		{'n', actionNet},
 		{'d', actionStorage},
 	}
@@ -42,6 +40,46 @@ func TestDashboardDirectActionsDispatchExpectedCommands(t *testing.T) {
 		if cmd == nil || got.choice.Action != tc.action || got.choice.Host != "alice@one:2222" {
 			t.Fatalf("key=%q choice=%#v cmd=%v", tc.key, got.choice, cmd)
 		}
+	}
+}
+
+func TestDashboardTransferDiscoveryStaysInsideTUI(t *testing.T) {
+	pull := newDashboardModel([]string{"alice@one:2222"})
+	updated, cmd := pull.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	pull = updated.(dashboardModel)
+	if cmd == nil || pull.transfer == nil || pull.transfer.Stage != transferScanRemoteSource || pull.done {
+		t.Fatalf("pull scan escaped TUI: cmd=%v model=%#v", cmd, pull)
+	}
+	updated, _ = pull.Update(transferScanMsg{Stage: transferScanRemoteSource, Items: []string{"projects/", "notes.txt"}})
+	pull = updated.(dashboardModel)
+	if pull.transfer.Stage != transferPickRemoteSource || !strings.Contains(pull.View(), "Choose what to download") {
+		t.Fatalf("pull picker unavailable: %#v\n%s", pull.transfer, pull.View())
+	}
+	updated, cmd = pull.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	pull = updated.(dashboardModel)
+	if cmd == nil || pull.choice.Action != actionPull || len(pull.choice.Args) != 3 || pull.choice.Args[1] != "projects/" {
+		t.Fatalf("pull selection=%#v cmd=%v", pull.choice, cmd)
+	}
+
+	push := newDashboardModel([]string{"alice@one:2222"})
+	updated, cmd = push.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	push = updated.(dashboardModel)
+	if cmd == nil || push.transfer == nil || push.transfer.Stage != transferScanLocalSource || push.done {
+		t.Fatalf("push local scan escaped TUI: cmd=%v model=%#v", cmd, push)
+	}
+	updated, _ = push.Update(transferScanMsg{Stage: transferScanLocalSource, Items: []string{"/tmp/payload"}})
+	push = updated.(dashboardModel)
+	updated, cmd = push.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	push = updated.(dashboardModel)
+	if cmd == nil || push.transfer.Stage != transferScanRemoteDest || push.transfer.LocalPath != "/tmp/payload" {
+		t.Fatalf("push remote scan did not start: cmd=%v flow=%#v", cmd, push.transfer)
+	}
+	updated, _ = push.Update(transferScanMsg{Stage: transferScanRemoteDest, Items: []string{"uploads/"}})
+	push = updated.(dashboardModel)
+	updated, cmd = push.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	push = updated.(dashboardModel)
+	if cmd == nil || push.choice.Action != actionPush || len(push.choice.Args) != 3 || push.choice.Args[2] != "uploads/" {
+		t.Fatalf("push selection=%#v cmd=%v", push.choice, cmd)
 	}
 }
 
@@ -240,7 +278,7 @@ func TestDashboardRenderStaysWithinTerminalBounds(t *testing.T) {
 
 func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 	for _, size := range [][2]int{{40, 16}, {72, 20}, {120, 32}} {
-		for _, overlay := range []string{"help", "commands", "themes", "guide", "confirm", "fleet"} {
+		for _, overlay := range []string{"help", "commands", "themes", "guide", "confirm", "fleet", "transfer"} {
 			model := newDashboardModel([]string{"alice@one"})
 			model.width, model.height = size[0], size[1]
 			switch overlay {
@@ -260,6 +298,11 @@ func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 				}
 			case "fleet":
 				model.showTopology = true
+			case "transfer":
+				model.transfer = &transferFlow{
+					Action: actionPull, Stage: transferPickRemoteSource,
+					Host: "alice@one", Items: []string{"projects/", "notes.txt"},
+				}
 			}
 			assertTerminalBounds(t, model.View(), size[0], size[1], overlay)
 		}

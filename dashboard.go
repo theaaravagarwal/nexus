@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ type dashboardSelection struct {
 	Action  dashboardAction
 	Host    string
 	Command commandConfig
+	Args    []string
 }
 
 type dashboardHost struct {
@@ -79,6 +81,33 @@ type metadataRefreshMsg struct {
 	Err      error
 }
 
+type transferScanMsg struct {
+	Stage transferStage
+	Items []string
+	Err   error
+}
+
+type transferStage string
+
+const (
+	transferScanRemoteSource transferStage = "scan-remote-source"
+	transferPickRemoteSource transferStage = "pick-remote-source"
+	transferScanLocalSource  transferStage = "scan-local-source"
+	transferPickLocalSource  transferStage = "pick-local-source"
+	transferScanRemoteDest   transferStage = "scan-remote-destination"
+	transferPickRemoteDest   transferStage = "pick-remote-destination"
+)
+
+type transferFlow struct {
+	Action    dashboardAction
+	Stage     transferStage
+	Host      string
+	Items     []string
+	Cursor    int
+	LocalPath string
+	Err       string
+}
+
 type dashboardModel struct {
 	hosts         []dashboardHost
 	filtered      []int
@@ -94,6 +123,7 @@ type dashboardModel struct {
 	commandQuery  string
 	confirmOpen   bool
 	confirmAction dashboardSelection
+	transfer      *transferFlow
 	helpOpen      bool
 	guideOpen     bool
 	themeOpen     bool
@@ -109,6 +139,7 @@ type dashboardModel struct {
 	probeComplete int
 	metadataBusy  map[string]bool
 	statePath     string
+	indexMode     string
 	notice        string
 	noticeError   bool
 	plain         bool
@@ -128,6 +159,7 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 		showTopology: false,
 		probeTargets: make(map[string]bool),
 		metadataBusy: make(map[string]bool),
+		indexMode:    "lazy",
 		plain:        noColorRequested(),
 		theme:        activeTheme(),
 		now:          now,
@@ -241,6 +273,121 @@ func (m dashboardModel) startMetadataRefresh() (tea.Model, tea.Cmd) {
 	return m, m.metadataCommand(target)
 }
 
+func (m dashboardModel) startTransfer(action dashboardAction) (tea.Model, tea.Cmd) {
+	target := m.selectedTarget()
+	if target == "" {
+		return m, nil
+	}
+	flow := &transferFlow{Action: action, Host: target}
+	if action == actionPull {
+		flow.Stage = transferScanRemoteSource
+	} else {
+		flow.Stage = transferScanLocalSource
+	}
+	m.transfer = flow
+	return m, m.transferScanCommand(flow.Stage)
+}
+
+func (m dashboardModel) transferScanCommand(stage transferStage) tea.Cmd {
+	target := ""
+	if m.transfer != nil {
+		target = m.transfer.Host
+	}
+	return func() tea.Msg {
+		switch stage {
+		case transferScanLocalSource:
+			cwd, err := os.Getwd()
+			if err != nil {
+				return transferScanMsg{Stage: stage, Err: err}
+			}
+			entries, err := os.ReadDir(cwd)
+			if err != nil {
+				return transferScanMsg{Stage: stage, Err: err}
+			}
+			items := []string{cwd}
+			for _, entry := range entries {
+				items = append(items, filepath.Join(cwd, entry.Name()))
+			}
+			return transferScanMsg{Stage: stage, Items: items}
+		case transferScanRemoteSource, transferScanRemoteDest:
+			action := "pull"
+			if stage == transferScanRemoteDest {
+				action = "push"
+			}
+			full := normalizeRemoteIndexMode(m.remoteIndexMode()) == "full"
+			items, _, err := getRemotePathsInternal("", target, ".", full, action)
+			return transferScanMsg{Stage: stage, Items: items, Err: err}
+		default:
+			return transferScanMsg{Stage: stage, Err: errors.New("unknown transfer scan stage")}
+		}
+	}
+}
+
+func (m dashboardModel) remoteIndexMode() string {
+	return m.indexMode
+}
+
+func (m dashboardModel) updateTransfer(key string) (tea.Model, tea.Cmd) {
+	if m.transfer == nil {
+		return m, nil
+	}
+	flow := *m.transfer
+	switch key {
+	case "esc", "q":
+		m.transfer = nil
+		return m, nil
+	case "r":
+		if flow.Err != "" {
+			flow.Err = ""
+			m.transfer = &flow
+			return m, m.transferScanCommand(flow.Stage)
+		}
+	case "up", "k":
+		flow.Cursor = max(0, flow.Cursor-1)
+	case "down", "j":
+		flow.Cursor = min(max(0, len(flow.Items)-1), flow.Cursor+1)
+	case "pgup":
+		flow.Cursor = max(0, flow.Cursor-8)
+	case "pgdown":
+		flow.Cursor = min(max(0, len(flow.Items)-1), flow.Cursor+8)
+	case "enter":
+		if flow.Err != "" || len(flow.Items) == 0 {
+			return m, nil
+		}
+		selected := flow.Items[flow.Cursor]
+		switch flow.Stage {
+		case transferPickRemoteSource:
+			cwd, err := os.Getwd()
+			if err != nil {
+				flow.Err = sanitizeTerminalText(err.Error())
+				break
+			}
+			m.choice = dashboardSelection{
+				Action: actionPull, Host: flow.Host,
+				Args: []string{flow.Host, selected, cwd},
+			}
+			m.done = true
+			return m, tea.Quit
+		case transferPickLocalSource:
+			flow.LocalPath = selected
+			flow.Items = nil
+			flow.Cursor = 0
+			flow.Stage = transferScanRemoteDest
+			m.transfer = &flow
+			return m, m.transferScanCommand(flow.Stage)
+		case transferPickRemoteDest:
+			m.choice = dashboardSelection{
+				Action: actionPush, Host: flow.Host,
+				Args: []string{flow.LocalPath, flow.Host, selected},
+			}
+			m.done = true
+			return m, tea.Quit
+		}
+	}
+	m.transfer = &flow
+	return m, nil
+}
+
 func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
@@ -297,6 +444,29 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = "System snapshot refreshed for " + m.displayNameForTarget(msg.Target)
 		m.noticeError = false
 		return m, nil
+	case transferScanMsg:
+		if m.transfer == nil || m.transfer.Stage != msg.Stage {
+			return m, nil
+		}
+		flow := *m.transfer
+		if msg.Err != nil {
+			flow.Err = sanitizeTerminalText(msg.Err.Error())
+			m.transfer = &flow
+			return m, nil
+		}
+		flow.Items = append([]string(nil), msg.Items...)
+		flow.Cursor = 0
+		flow.Err = ""
+		switch msg.Stage {
+		case transferScanRemoteSource:
+			flow.Stage = transferPickRemoteSource
+		case transferScanLocalSource:
+			flow.Stage = transferPickLocalSource
+		case transferScanRemoteDest:
+			flow.Stage = transferPickRemoteDest
+		}
+		m.transfer = &flow
+		return m, nil
 	case tea.KeyMsg:
 		return m.updateKey(msg)
 	}
@@ -308,6 +478,9 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		m.done = true
 		return m, tea.Quit
+	}
+	if m.transfer != nil {
+		return m.updateTransfer(key)
 	}
 	if m.helpOpen {
 		switch key {
@@ -386,6 +559,10 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			command := commands[m.commandCursor]
 			switch command.Action {
+			case actionPull, actionPush:
+				m.commandOpen = false
+				m.commandQuery = ""
+				return m.startTransfer(command.Action)
 			case actionInfo:
 				m.commandOpen = false
 				m.commandQuery = ""
@@ -473,9 +650,9 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "s":
 		return m.choose(actionSSH)
 	case "p":
-		return m.choose(actionPull)
+		return m.startTransfer(actionPull)
 	case "u":
-		return m.choose(actionPush)
+		return m.startTransfer(actionPush)
 	case "t":
 		m.showTopology = true
 	case "r":
@@ -633,6 +810,9 @@ func (m dashboardModel) View() string {
 	}
 	if m.helpOpen {
 		return fitTerminalView(m.helpView(), m.width, m.height)
+	}
+	if m.transfer != nil {
+		return fitTerminalView(m.transferView(), m.width, m.height)
 	}
 	if m.confirmOpen {
 		return fitTerminalView(m.confirmCommandView(), m.width, m.height)
@@ -1068,6 +1248,95 @@ func (m dashboardModel) fleetView() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
 }
 
+func (m dashboardModel) transferView() string {
+	s := m.styles()
+	flow := m.transfer
+	if flow == nil {
+		return ""
+	}
+	width := min(max(48, m.width-12), 84)
+	title := "PULL · REMOTE SOURCE"
+	subtitle := "Scanning remote paths in the background…"
+	switch flow.Stage {
+	case transferPickRemoteSource:
+		subtitle = "Choose what to download"
+	case transferScanLocalSource:
+		title = "PUSH · LOCAL SOURCE"
+		subtitle = "Scanning the current directory in the background…"
+	case transferPickLocalSource:
+		title = "PUSH · LOCAL SOURCE"
+		subtitle = "Choose a local file or directory"
+	case transferScanRemoteDest:
+		title = "PUSH · REMOTE DESTINATION"
+		subtitle = "Scanning remote directories in the background…"
+	case transferPickRemoteDest:
+		title = "PUSH · REMOTE DESTINATION"
+		subtitle = "Choose where to upload"
+	}
+	lines := []string{
+		s.focus.Render(title),
+		s.muted.Render(truncateText(flow.Host, width-6)),
+		s.text.Render(subtitle),
+		"",
+	}
+	if flow.Err != "" {
+		lines = append(lines,
+			s.failure.Render("Scan failed: "+truncateText(flow.Err, width-12)),
+			s.muted.Render("[r] retry   [esc] cancel"),
+		)
+	} else if strings.HasPrefix(string(flow.Stage), "scan-") {
+		lines = append(lines,
+			s.muted.Render("◌ Working without leaving Nexus"),
+			"",
+			s.muted.Render("[esc] cancel"),
+		)
+	} else {
+		maxRows := max(1, m.height-11)
+		start := 0
+		if flow.Cursor >= maxRows {
+			start = flow.Cursor - maxRows + 1
+		}
+		end := min(len(flow.Items), start+maxRows)
+		if len(flow.Items) == 0 {
+			lines = append(lines, s.muted.Render("No paths found."), s.muted.Render("[esc] cancel"))
+		}
+		for index := start; index < end; index++ {
+			label := transferPathLabel(flow.Items[index], flow.Stage)
+			line := truncateText(label, width-8)
+			if index == flow.Cursor {
+				line = s.selected.Render("› " + padCell(line, width-6))
+			} else {
+				line = "  " + s.text.Render(line)
+			}
+			lines = append(lines, line)
+		}
+		lines = append(lines, "", s.muted.Render("[enter] choose   [↑↓] move   [esc] cancel"))
+	}
+	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+}
+
+func transferPathLabel(item string, stage transferStage) string {
+	if stage != transferPickLocalSource {
+		return item
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return item
+	}
+	if item == cwd {
+		return ".  ·  current directory"
+	}
+	relative, err := filepath.Rel(cwd, item)
+	if err != nil {
+		return item
+	}
+	if info, err := os.Stat(item); err == nil && info.IsDir() {
+		return relative + "/"
+	}
+	return relative
+}
+
 func (m dashboardModel) savedCommandGuideView() string {
 	s := m.styles()
 	width := min(max(48, m.width-14), 78)
@@ -1335,6 +1604,7 @@ func (a *app) runDashboard() error {
 		hosts = sortHostsByFrecency(hosts, state, now)
 		model := newDashboardModelWithState(hosts, state, now)
 		model.statePath = a.stateFile
+		model.indexMode = normalizeRemoteIndexMode(a.remoteIndex)
 		model.notice = notice
 		model.noticeError = noticeError
 		if len(resumeReachability) > 0 {
@@ -1438,7 +1708,11 @@ func (a *app) executeDashboardSelection(selection dashboardSelection) error {
 	default:
 		return errors.New("unknown dashboard action")
 	}
-	return command.RunE(command, []string{selection.Host})
+	args := selection.Args
+	if len(args) == 0 {
+		args = []string{selection.Host}
+	}
+	return command.RunE(command, args)
 }
 
 func confirmRemoteCommand(target string, command commandConfig) error {

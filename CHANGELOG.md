@@ -23,6 +23,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - The dashboard now uses truthful workspace actions, freshness-aware system snapshots, distinct monochrome reachability glyphs, an honest saved-peer fleet overview, and live in-TUI theme previews.
 - The dashboard now defaults to a calmer two-region daily-driver layout with compact host rows and on-demand fleet, theme, and saved-command guidance.
 - Reachability results stream per host, authenticated system snapshots refresh without leaving the TUI, and terminal-owning actions return to the same selected host with completion or recovery status.
+- Pull and push path discovery now run inside a native TUI picker instead of dropping into an external FZF session.
 - Saved commands now include an in-TUI explanation, safe YAML example, scope guidance, and exact-command confirmation.
 - Nexus configuration and state files use private permissions, atomic locked updates, strict YAML fields, and terminal-control sanitization.
 - Remote diagnostics avoid login-shell startup files and use portable system and network summaries when optional probe utilities are unavailable.

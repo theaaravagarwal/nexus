@@ -49,8 +49,9 @@ The default `nexus` theme is anchored by:
   and `◌` checking, so state survives monochrome terminals.
 - Fleet is an optional endpoint overview and explicitly describes TCP
   reachability without implying discovery, authentication, or dependency links.
-- Finite scans update inside the TUI. Terminal-owning actions temporarily
-  suspend the workspace and restore the same selected host when they finish.
+- Finite scans update inside the TUI. Pull/push path discovery uses a native
+  terminal picker; only the actual transfer temporarily owns the terminal.
+  Terminal-owning actions restore the same selected host when they finish.
 - The footer prioritizes active work, completion, and recovery over static
   theme or shortcut status.
 
