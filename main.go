@@ -457,7 +457,7 @@ func (a *app) newSSHCmd() *cobra.Command {
 			fmt.Printf("Connecting to %s\n", host)
 
 			if err := runInteractiveSSH(host); err != nil {
-				return fmt.Errorf("Connection Failed: %w", err)
+				return fmt.Errorf("connection failed: %w", err)
 			}
 			return nil
 		},
@@ -1747,7 +1747,7 @@ func runRsync(source, destination string, opts rsyncOptions) error {
 
 	args := buildRsyncArgs(rsyncBin, source, destination, opts)
 	if opts.dryRun {
-		fmt.Fprintf(os.Stdout, "Dry run: %s\n", formatCommand(rsyncBin, args))
+		_, _ = fmt.Fprintf(os.Stdout, "Dry run: %s\n", formatCommand(rsyncBin, args))
 	}
 
 	if err := runRsyncCommand(rsyncBin, args); err != nil {

@@ -21,7 +21,7 @@ func newVersionCmd() *cobra.Command {
 		Args:        cobra.NoArgs,
 		Annotations: map[string]string{"skip-bootstrap": "true"},
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "nexus %s (%s, %s, %s/%s)\n", version, commit, date, runtime.GOOS, runtime.GOARCH)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "nexus %s (%s, %s, %s/%s)\n", version, commit, date, runtime.GOOS, runtime.GOARCH)
 		},
 	}
 }
@@ -69,9 +69,9 @@ func (a *app) newDoctorCmd() *cobra.Command {
 				if path != "" {
 					status += " (" + path + ")"
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%-8s %s\n", binary, status)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-8s %s\n", binary, status)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "config   %s\nhistory  %s\n", a.configFile, a.hostsFile)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "config   %s\nhistory  %s\n", a.configFile, a.hostsFile)
 			if requiredMissing {
 				return fmt.Errorf("required dependency missing: ssh")
 			}
