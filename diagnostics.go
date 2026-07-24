@@ -195,7 +195,9 @@ func runRemoteProbe(host string, fallbacks []string, sudo bool) error {
 		if lastErr == nil {
 			return nil
 		}
-		if !isExitCode(lastErr, 1) && !isExitCode(lastErr, 126) && !isExitCode(lastErr, 127) {
+		// Exit 1 is often a real result from a tool that did run. Retrying it
+		// through more shells can repeat side effects and hide the first error.
+		if !shouldRetryRemoteShell(lastErr) {
 			return lastErr
 		}
 	}
@@ -332,6 +334,10 @@ func runRemoteInteractiveCommand(host, runScript string) error {
 		}
 	}
 	return fmt.Errorf("unable to run remote command on %s: %w", host, lastErr)
+}
+
+func shouldRetryRemoteShell(err error) bool {
+	return isExitCode(err, 126) || isExitCode(err, 127)
 }
 
 func remoteShellCommand(shell, script string) string {

@@ -1,13 +1,205 @@
 package main
 
-import "testing"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
-func TestParseMetadataSanitizesAndSelectsKnownFields(t *testing.T) {
-	got := parseMetadata("OS=Ubuntu 24.04\nCPU=Example\x1b[31m\nTOOLS=btop,duf\nSECRET=nope\n")
-	if got["OS"] != "Ubuntu 24.04" || got["CPU"] != "Example [31m" || got["TOOLS"] != "btop,duf" {
-		t.Fatalf("got=%#v", got)
+func TestParseMetadataCollectsStructuredSnapshot(t *testing.T) {
+	input := strings.Join([]string{
+		"OS=Ubuntu 24.04",
+		"CPU=Example CPU",
+		"MEMORY_BYTES=34359738368",
+		"GPU=NVIDIA RTX 4090 · 25.8 GB VRAM",
+		"GPU=AMD Radeon",
+		"DISK=/dev/nvme0n1p2\t/\t500000000000\t400000000000\t1000000000000",
+		"DISK=/dev/sda1\t/data\t1000000000000\t1000000000000\t2000000000000",
+		"TOOLS=btop,duf,df",
+		"SECRET=nope",
+	}, "\n")
+
+	got := parseMetadata(input)
+	if got.OS != "Ubuntu 24.04" || got.CPU != "Example CPU" || got.MemoryBytes != 34359738368 {
+		t.Fatalf("identity/memory fields=%#v", got)
 	}
-	if _, exists := got["SECRET"]; exists {
-		t.Fatal("unknown field accepted")
+	if len(got.GPUs) != 2 || got.GPUs[0] != "NVIDIA RTX 4090 · 25.8 GB VRAM" {
+		t.Fatalf("GPUs=%v", got.GPUs)
+	}
+	if len(got.Disks) != 2 {
+		t.Fatalf("disks=%#v", got.Disks)
+	}
+	root := got.Disks[0]
+	if root.Filesystem != "/dev/nvme0n1p2" || root.Mountpoint != "/" ||
+		root.UsedBytes != 500000000000 || root.AvailableBytes != 400000000000 ||
+		root.TotalBytes != 1000000000000 {
+		t.Fatalf("root disk=%#v", root)
+	}
+	if strings.Join(got.Tools, ",") != "btop,duf,df" {
+		t.Fatalf("tools=%v", got.Tools)
+	}
+}
+
+func TestParseMetadataSanitizesANSIControlsAndUnknownFields(t *testing.T) {
+	got := parseMetadata(
+		"OS=\x1b[31mUbuntu\x1b[0m\n" +
+			"CPU=Example\x1b]52;c;secret\a CPU\n" +
+			"GPU=\x1b[32mGPU\x1b[0m\n" +
+			"TOOLS=btop,\x1b[31mduf\x1b[0m,\u009b32mncdu\u009b0m\n" +
+			"SECRET=nope\n",
+	)
+	if got.OS != "Ubuntu" || got.CPU != "Example CPU" {
+		t.Fatalf("sanitized snapshot=%#v", got)
+	}
+	if len(got.GPUs) != 1 || got.GPUs[0] != "GPU" {
+		t.Fatalf("GPUs=%v", got.GPUs)
+	}
+	if strings.Join(got.Tools, ",") != "btop,duf,ncdu" {
+		t.Fatalf("tools=%v", got.Tools)
+	}
+}
+
+func TestParseMetadataRejectsMalformedNumericAndDiskRecords(t *testing.T) {
+	got := parseMetadata(strings.Join([]string{
+		"MEMORY_BYTES=not-a-number",
+		"DISK=/dev/a\t/\t1\t2",
+		"DISK=/dev/b\t/data\tused\t2\t3",
+		"DISK=/dev/c\t/data\t1\t2\t0",
+	}, "\n"))
+	if got.MemoryBytes != 0 || len(got.Disks) != 0 || got.usable() {
+		t.Fatalf("malformed metadata accepted: %#v", got)
+	}
+}
+
+func TestParseMetadataDeduplicatesAndCapsRepeatedRecords(t *testing.T) {
+	var input strings.Builder
+	input.WriteString("GPU=Same GPU\nGPU=same gpu\n")
+	input.WriteString("DISK=/dev/a\t/\t1\t2\t3\nDISK=/dev/a\t/\t1\t2\t3\n")
+	input.WriteString("TOOLS=df,DF,duf\n")
+	for index := 0; index < maxMetadataGPUs+10; index++ {
+		fmt.Fprintf(&input, "GPU=GPU %d\n", index)
+	}
+	for index := 0; index < maxMetadataDisks+10; index++ {
+		fmt.Fprintf(&input, "DISK=/dev/%d\t/mnt/%d\t1\t2\t3\n", index, index)
+	}
+
+	got := parseMetadata(input.String())
+	if len(got.GPUs) != maxMetadataGPUs {
+		t.Fatalf("GPU count=%d, want cap %d", len(got.GPUs), maxMetadataGPUs)
+	}
+	if len(got.Disks) != maxMetadataDisks {
+		t.Fatalf("disk count=%d, want cap %d", len(got.Disks), maxMetadataDisks)
+	}
+	if strings.Join(got.Tools, ",") != "df,duf" {
+		t.Fatalf("tools=%v", got.Tools)
+	}
+}
+
+func TestFormatDecimalBytesUsesSIUnits(t *testing.T) {
+	tests := []struct {
+		bytes uint64
+		want  string
+	}{
+		{32 * 1024 * 1024 * 1024, "34.4 GB"},
+		{500_000_000_000, "500 GB"},
+		{2_000_000_000_000, "2 TB"},
+	}
+	for _, test := range tests {
+		if got := formatDecimalBytes(test.bytes); got != test.want {
+			t.Fatalf("formatDecimalBytes(%d)=%q, want %q", test.bytes, got, test.want)
+		}
+	}
+}
+
+func TestNormalizeLegacyCapacityTextUsesDecimalUnits(t *testing.T) {
+	tests := map[string]string{
+		"124Gi":                "133.1 GB",
+		"16 GiB":               "17.2 GB",
+		"5 / 20 GiB (25%)":     "5.4 GB / 21.5 GB (25%)",
+		"1.6T / 1.8T (91%)":    "1.8 TB / 2 TB (91%)",
+		"already 34.4 GB":      "already 34.4 GB",
+		"no capacity reported": "no capacity reported",
+	}
+	for input, want := range tests {
+		if got := normalizeLegacyCapacityText(input); got != want {
+			t.Fatalf("normalizeLegacyCapacityText(%q)=%q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestLegacyDiskSummaryPrefersRootFilesystem(t *testing.T) {
+	disks := []diskUsage{
+		{Filesystem: "/dev/data", Mountpoint: "/data", UsedBytes: 1_000_000_000, TotalBytes: 10_000_000_000},
+		{Filesystem: "/dev/root", Mountpoint: "/", UsedBytes: 250_000_000_000, TotalBytes: 1_000_000_000_000},
+	}
+	if got := legacyDiskSummary(disks); got != "250 GB / 1 TB (25%)" {
+		t.Fatalf("summary=%q", got)
+	}
+}
+
+func TestMetadataSnapshotUsableWithAnyStructuredField(t *testing.T) {
+	if (hostMetadataSnapshot{}).usable() {
+		t.Fatal("empty snapshot is usable")
+	}
+	for _, snapshot := range []hostMetadataSnapshot{
+		{CPU: "CPU"},
+		{MemoryBytes: 1},
+		{GPUs: []string{"GPU"}},
+		{Disks: []diskUsage{{TotalBytes: 1}}},
+		{Tools: []string{"df"}},
+	} {
+		if !snapshot.usable() {
+			t.Fatalf("snapshot should be usable: %#v", snapshot)
+		}
+	}
+}
+
+func TestRefreshMetadataPreservesCachedFieldsMissingFromPartialProbe(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(binDir, "ssh"),
+		[]byte("#!/bin/sh\nprintf 'CPU=New CPU\\n'\n"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state := nexusState{Version: 1, Hosts: map[string]hostActivity{
+		"alice@example.com": {
+			OS: "Cached OS", CPU: "Old CPU", Memory: "34.4 GB",
+			GPUs:  []string{"Cached GPU"},
+			Disks: []diskUsage{{Filesystem: "/dev/root", Mountpoint: "/", TotalBytes: 1_000_000_000}},
+			Tools: []string{"btop"},
+		},
+	}}
+	if err := saveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := refreshHostMetadata(statePath, "alice@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := loadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := updated.Hosts["alice@example.com"]
+	if entry.CPU != "New CPU" || entry.OS != "Cached OS" || entry.Memory != "34.4 GB" ||
+		len(entry.GPUs) != 1 || len(entry.Disks) != 1 || len(entry.Tools) != 1 {
+		t.Fatalf("partial refresh erased cached metadata: %#v", entry)
+	}
+}
+
+func TestMetadataOutputIsBoundedWithoutShortWrites(t *testing.T) {
+	var output boundedMetadataOutput
+	chunk := []byte(strings.Repeat("x", maxMetadataBytes+1024))
+	written, err := output.Write(chunk)
+	if err != nil || written != len(chunk) {
+		t.Fatalf("Write()=(%d, %v), want (%d, nil)", written, err, len(chunk))
+	}
+	if len(output.String()) != maxMetadataBytes {
+		t.Fatalf("captured bytes=%d, want %d", len(output.String()), maxMetadataBytes)
 	}
 }

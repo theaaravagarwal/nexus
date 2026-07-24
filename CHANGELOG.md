@@ -16,6 +16,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Theme previews and configuration inspection commands.
 - Global, tag-inherited, and per-host custom remote commands with mandatory exact-command confirmation.
 - Host aliases, tags, OS labels, and commands in YAML configuration.
+- Confirmed `ssh-copy-id` setup for selected hosts, including saved non-default ports.
 
 ### Changed
 
@@ -30,6 +31,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Saved commands now keep bounded, sanitized output inside a scrollable Nexus result view; commands marked `interactive: true` can still temporarily own the terminal.
 - The Actions menu now uses concise names, accepts spaces in search, and keeps frequently used actions near the top.
 - Selected host rows no longer expose terminal color-control fragments in narrow or highlighted layouts.
+- Completed reachability probes now group online hosts first, with frequency and recency as the stable suborder.
+- System snapshots now include bounded multi-GPU and mounted-filesystem inventories, with RAM and storage rendered in decimal GB/TB.
+- Storage output now stays inside the scrollable TUI result view, while medium and wide layouts use spare space for selected-host resources.
+- Captured commands have a timeout, metadata strips terminal-control sequences completely, and diagnostic shell fallbacks no longer rerun ordinary exit-code failures.
 - Nexus configuration and state files use private permissions, atomic locked updates, strict YAML fields, and terminal-control sanitization.
 - Remote diagnostics avoid login-shell startup files and use portable system and network summaries when optional probe utilities are unavailable.
 - Interactive SSH sessions distinguish remote shell exit codes from connection failures.

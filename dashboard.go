@@ -38,6 +38,7 @@ const (
 	actionNet      dashboardAction = "net"
 	actionInfo     dashboardAction = "info"
 	actionStorage  dashboardAction = "storage"
+	actionCopyKey  dashboardAction = "copy-key"
 	actionCustom   dashboardAction = "custom"
 	actionConfig   dashboardAction = "config"
 	actionFleet    dashboardAction = "fleet"
@@ -59,9 +60,12 @@ type dashboardHost struct {
 	Tags         []string
 	OS           string
 	CPU          string
+	GPUs         []string
 	Memory       string
 	Disk         string
+	Disks        []diskUsage
 	Tools        []string
+	Score        float64
 	Updated      time.Time
 	LastUsed     time.Time
 	Reachability reachabilityResult
@@ -104,6 +108,7 @@ type actionUsageMsg struct {
 }
 
 type configuredCommandResult struct {
+	Action  dashboardAction
 	Host    string
 	Command commandConfig
 	Output  string
@@ -210,9 +215,12 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 			Tags:     profile.Tags,
 			OS:       osName,
 			CPU:      activity.CPU,
-			Memory:   activity.Memory,
-			Disk:     activity.Disk,
+			GPUs:     append([]string(nil), activity.GPUs...),
+			Memory:   normalizeLegacyCapacityText(activity.Memory),
+			Disk:     normalizeLegacyCapacityText(activity.Disk),
+			Disks:    append([]diskUsage(nil), activity.Disks...),
 			Tools:    activity.Tools,
+			Score:    activity.Score,
 			Updated:  activity.Updated,
 			LastUsed: activity.LastUsed,
 			Reachability: reachabilityResult{
@@ -441,6 +449,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.probeComplete >= m.probeTotal {
 			m.probing = false
 			m.probeInitial = nil
+			m.sortHostsByAvailabilityKeeping(m.selectedTarget())
 			delay := time.Duration(loadedConfig.Reachability.CacheSeconds) * time.Second
 			return m, tea.Tick(delay, func(time.Time) tea.Msg { return probeTickMsg{} })
 		}
@@ -464,14 +473,23 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.hosts[i].OS = msg.Activity.OS
 			m.hosts[i].CPU = msg.Activity.CPU
+			m.hosts[i].GPUs = append([]string(nil), msg.Activity.GPUs...)
 			m.hosts[i].Memory = msg.Activity.Memory
 			m.hosts[i].Disk = msg.Activity.Disk
+			m.hosts[i].Disks = append([]diskUsage(nil), msg.Activity.Disks...)
 			m.hosts[i].Tools = append([]string(nil), msg.Activity.Tools...)
 			m.hosts[i].Updated = msg.Activity.Updated
 			break
 		}
 		m.notice = "System snapshot refreshed for " + m.displayNameForTarget(msg.Target)
 		m.noticeError = false
+		usedAt := time.Now()
+		if m.statePath != "" {
+			if err := recordHostSuccess(m.statePath, msg.Target, usedAt); err != nil {
+				logVerbose("failed to record host activity: %v", err)
+			}
+		}
+		m.markHostUsed(msg.Target, usedAt)
 		return m, nil
 	case themeSaveMsg:
 		m.themeSaving = false
@@ -496,10 +514,14 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandResult.Output = msg.Output
 		if msg.Err != nil {
 			m.commandResult.Err = sanitizeTerminalText(msg.Err.Error())
-		} else if m.statePath != "" {
-			if err := recordHostSuccess(m.statePath, m.commandResult.Host, time.Now()); err != nil {
-				logVerbose("failed to record host activity: %v", err)
+		} else {
+			usedAt := time.Now()
+			if m.statePath != "" {
+				if err := recordHostSuccess(m.statePath, m.commandResult.Host, usedAt); err != nil {
+					logVerbose("failed to record host activity: %v", err)
+				}
 			}
+			m.markHostUsed(m.commandResult.Host, usedAt)
 		}
 		return m, nil
 	case actionUsageMsg:
@@ -565,6 +587,9 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandOffset = 0
 				m.commandResult.Output = ""
 				m.commandResult.Err = ""
+				if m.commandResult.Action == actionStorage {
+					return m, m.storageCommandCmd(m.commandResult.Host)
+				}
 				return m, m.configuredCommandCmd(m.commandResult.Host, m.commandResult.Command.Command)
 			}
 		}
@@ -580,6 +605,12 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.confirmOpen {
 		switch key {
 		case "y":
+			if m.confirmAction.Action == actionCopyKey {
+				usageCmd := m.recordActionUsage(actionCopyKey, commandConfig{})
+				m.choice = m.confirmAction
+				m.done = true
+				return m, tea.Sequence(usageCmd, tea.Quit)
+			}
 			usageCmd := m.recordActionUsage(actionCustom, m.confirmAction.Command)
 			if !m.confirmAction.Command.Interactive {
 				selection := m.confirmAction
@@ -725,6 +756,42 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case actionConfig:
 				updated, commandCmd := m.choose(actionConfig)
 				return updated, tea.Sequence(usageCmd, commandCmd)
+			case actionStorage:
+				m.commandOpen = false
+				m.commandFiltering = false
+				m.commandQuery = ""
+				m.commandRunning = true
+				m.commandOffset = 0
+				m.commandResult = &configuredCommandResult{
+					Action: actionStorage,
+					Host:   m.selectedTarget(),
+					Command: commandConfig{
+						Name: "Storage", Description: "All mounted filesystems",
+					},
+				}
+				return m, tea.Batch(usageCmd, m.storageCommandCmd(m.selectedTarget()))
+			case actionCopyKey:
+				m.commandOpen = false
+				m.commandFiltering = false
+				m.commandQuery = ""
+				args, err := buildSSHCopyIDArgs(m.selectedTarget())
+				if err != nil {
+					m.notice = "Copy key unavailable: " + sanitizeTerminalText(err.Error())
+					m.noticeError = true
+					return m, nil
+				}
+				m.confirmOpen = true
+				m.confirmAction = dashboardSelection{
+					Action: actionCopyKey,
+					Host:   m.selectedTarget(),
+					Command: commandConfig{
+						Name:        "Copy SSH key",
+						Description: "Set up passwordless SSH",
+						Command:     formatCommand("ssh-copy-id", args),
+						Interactive: true,
+					},
+				}
+				return m, nil
 			}
 			if command.Action == actionCustom {
 				m.commandOpen = false
@@ -818,6 +885,58 @@ func (m dashboardModel) configuredCommandCmd(host, command string) tea.Cmd {
 	}
 }
 
+const storageInventoryScript = `LC_ALL=C df -Pk 2>/dev/null | awk 'NR > 1 && NF >= 6 && $2 ~ /^[0-9]+$/ && $2 > 0 { mount=$6; for (field=7; field<=NF; field++) mount=mount " " $field; printf "DISK=%s\t%s\t%.0f\t%.0f\t%.0f\n", $1, mount, $3 * 1024, $4 * 1024, $2 * 1024 }'`
+
+func (m dashboardModel) storageCommandCmd(host string) tea.Cmd {
+	return func() tea.Msg {
+		output, err := captureRemoteStorage(host)
+		return configuredCommandMsg{Output: output, Err: err}
+	}
+}
+
+func captureRemoteStorage(target string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command, err := buildSSHCommand(ctx, target, false, remoteShellCommand("sh", storageInventoryScript))
+	if err != nil {
+		return "", err
+	}
+	output := &cappedCommandOutput{limit: maxMetadataBytes}
+	command.Stdout = output
+	command.Stderr = output
+	if err := command.Run(); err != nil {
+		if ctx.Err() != nil {
+			return output.String(), fmt.Errorf("storage scan timed out: %w", ctx.Err())
+		}
+		return output.String(), fmt.Errorf("storage scan failed: %w", err)
+	}
+	snapshot := parseMetadata(output.builder.String())
+	if len(snapshot.Disks) == 0 {
+		return "", errors.New("storage scan returned no mounted filesystems")
+	}
+	return renderStorageInventory(snapshot.Disks), nil
+}
+
+func renderStorageInventory(disks []diskUsage) string {
+	lines := []string{"MOUNT  USED / TOTAL  AVAILABLE  USE  FILESYSTEM"}
+	for _, disk := range disks {
+		percent := 0.0
+		if disk.TotalBytes > 0 {
+			percent = float64(disk.UsedBytes) * 100 / float64(disk.TotalBytes)
+		}
+		lines = append(lines, fmt.Sprintf(
+			"%s  %s / %s  %s free  %.0f%%  %s",
+			disk.Mountpoint,
+			valueOr(formatDecimalBytes(disk.UsedBytes), "0 GB"),
+			valueOr(formatDecimalBytes(disk.TotalBytes), "0 GB"),
+			valueOr(formatDecimalBytes(disk.AvailableBytes), "0 GB"),
+			percent,
+			disk.Filesystem,
+		))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func dashboardActionUsageKey(action dashboardAction, command commandConfig) string {
 	if action == actionCustom {
 		return "custom:" + strings.ToLower(strings.TrimSpace(command.Name))
@@ -861,8 +980,11 @@ func (m dashboardModel) choose(action dashboardAction) (tea.Model, tea.Cmd) {
 }
 
 func (m *dashboardModel) applyFilter() {
+	m.applyFilterKeeping(m.selectedTarget())
+}
+
+func (m *dashboardModel) applyFilterKeeping(selected string) {
 	needle := strings.ToLower(strings.TrimSpace(m.query))
-	selected := m.selectedTarget()
 	m.filtered = m.filtered[:0]
 	for i, host := range m.hosts {
 		haystack := strings.ToLower(strings.Join([]string{
@@ -881,6 +1003,41 @@ func (m *dashboardModel) applyFilter() {
 		}
 	}
 	m.cursor = min(m.cursor, max(0, len(m.filtered)-1))
+}
+
+func (m *dashboardModel) sortHostsByAvailabilityKeeping(selected string) {
+	sort.SliceStable(m.hosts, func(left, right int) bool {
+		leftOnline := m.hosts[left].Reachability.Status == reachOnline
+		rightOnline := m.hosts[right].Reachability.Status == reachOnline
+		if leftOnline != rightOnline {
+			return leftOnline
+		}
+		leftUsage := frecency(hostActivity{
+			Score: m.hosts[left].Score, LastUsed: m.hosts[left].LastUsed,
+		}, m.now)
+		rightUsage := frecency(hostActivity{
+			Score: m.hosts[right].Score, LastUsed: m.hosts[right].LastUsed,
+		}, m.now)
+		return leftUsage > rightUsage
+	})
+	m.applyFilterKeeping(selected)
+}
+
+func (m *dashboardModel) markHostUsed(target string, usedAt time.Time) {
+	selected := m.selectedTarget()
+	for index := range m.hosts {
+		if m.hosts[index].Target != target {
+			continue
+		}
+		m.hosts[index].Score++
+		if m.hosts[index].Score < 1 {
+			m.hosts[index].Score = 1
+		}
+		m.hosts[index].LastUsed = usedAt
+		break
+	}
+	m.now = usedAt
+	m.sortHostsByAvailabilityKeeping(selected)
 }
 
 func (m dashboardModel) selectedTarget() string {
@@ -917,6 +1074,7 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 	}
 	commands := []dashboardCommand{
 		{"Connect", "Open SSH session", actionSSH, commandConfig{}},
+		{"Copy key", "Set up passwordless SSH", actionCopyKey, commandConfig{}},
 		{"Pull", "Download from remote", actionPull, commandConfig{}},
 		{"Push", "Upload to remote", actionPush, commandConfig{}},
 		{"Refresh info", "Update system details", actionInfo, commandConfig{}},
@@ -997,11 +1155,18 @@ func (m dashboardModel) View() string {
 
 	var body string
 	switch {
-	case m.width >= 72:
-		hostWidth := min(52, max(34, m.width*43/100))
+	case m.width >= 96:
+		hostWidth := min(48, max(38, m.width*38/100))
 		body = lipgloss.JoinHorizontal(lipgloss.Top,
 			fitTerminalView(m.hostListView(s, hostWidth, bodyHeight), hostWidth, bodyHeight),
 			fitTerminalView(m.detailView(s, m.width-hostWidth, bodyHeight), m.width-hostWidth, bodyHeight),
+		)
+	case m.width >= 72 && bodyHeight >= 18:
+		hostHeight := max(10, bodyHeight*3/5)
+		detailHeight := bodyHeight - hostHeight
+		body = lipgloss.JoinVertical(lipgloss.Left,
+			fitTerminalView(m.hostListView(s, m.width, hostHeight), m.width, hostHeight),
+			fitTerminalView(m.compactDetailView(s, m.width, detailHeight), m.width, detailHeight),
 		)
 	default:
 		body = m.compactView(s, m.width, bodyHeight)
@@ -1107,7 +1272,7 @@ func (m dashboardModel) hostListView(s dashboardStyles, width, height int) strin
 		titleText += " · j/k move"
 	}
 	title := s.focus.Render(titleText)
-	filter := "[/] find hosts"
+	filter := "[/] find · online first · frequent within status"
 	if m.filtering || m.query != "" {
 		filter = "Find: " + m.query
 		if m.filtering {
@@ -1144,7 +1309,7 @@ func (m dashboardModel) hostListView(s dashboardStyles, width, height int) strin
 	}
 	content := strings.Join(lines, "\n")
 	panel := s.panel.BorderLeft(false).BorderTop(false).BorderBottom(false)
-	if width == m.width && m.width < 72 {
+	if width == m.width {
 		panel = panel.BorderRight(false)
 	}
 	return panel.Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 1).Render(content)
@@ -1224,8 +1389,11 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 		s.title.Render(name),
 		s.muted.Render(host.Target),
 		m.statusText(s, host.Reachability) + s.muted.Render("  ·  used "+relativeTime(host.LastUsed, m.now)),
-		"",
 	}
+	if len(host.Tags) > 0 {
+		lines = append(lines, s.muted.Render("tags  "+strings.Join(host.Tags, " · ")))
+	}
+	lines = append(lines, "")
 	snapshotState := "not scanned · use Actions"
 	if m.metadataBusy[host.Target] {
 		snapshotState = "refreshing…"
@@ -1242,37 +1410,102 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 	lines = append(lines,
 		s.text.Render("OS       ")+s.muted.Render(valueOr(host.OS, "unknown")),
 		s.text.Render("CPU      ")+s.muted.Render(valueOr(host.CPU, "unknown")),
-		s.text.Render("Memory   ")+s.muted.Render(valueOr(host.Memory, "unknown")),
-		s.text.Render("Disk     ")+s.muted.Render(valueOr(host.Disk, "unknown")),
 	)
-	if len(host.Tags) > 0 {
-		lines = append(lines, s.text.Render("Tags     ")+s.muted.Render(strings.Join(host.Tags, " · ")))
+	if len(host.GPUs) == 0 {
+		lines = append(lines, s.text.Render("GPU      ")+s.muted.Render("unknown"))
+	} else {
+		gpuLimit := min(2, len(host.GPUs))
+		for index := 0; index < gpuLimit; index++ {
+			label := "         "
+			if index == 0 {
+				label = "GPU      "
+			}
+			lines = append(lines, s.text.Render(label)+s.muted.Render(host.GPUs[index]))
+		}
+		if hidden := len(host.GPUs) - gpuLimit; hidden > 0 {
+			lines = append(lines, s.muted.Render(fmt.Sprintf("         +%d more GPUs", hidden)))
+		}
 	}
+	lines = append(lines, s.text.Render("Memory   ")+s.muted.Render(valueOr(host.Memory, "unknown")), "")
+
+	lines = append(lines, s.focus.Render("STORAGE"))
+	if len(host.Disks) == 0 {
+		lines = append(lines, s.muted.Render(valueOr(host.Disk, "Not scanned · choose Storage in Actions")))
+	} else {
+		diskLimit := min(len(host.Disks), max(1, height-len(lines)-7))
+		for _, disk := range host.Disks[:diskLimit] {
+			percent := 0.0
+			if disk.TotalBytes > 0 {
+				percent = float64(disk.UsedBytes) * 100 / float64(disk.TotalBytes)
+			}
+			mount := padCell(truncateText(disk.Mountpoint, 12), 12)
+			line := fmt.Sprintf("%s  %s / %s  %.0f%%",
+				mount,
+				valueOr(formatDecimalBytes(disk.UsedBytes), "0 GB"),
+				valueOr(formatDecimalBytes(disk.TotalBytes), "0 GB"),
+				percent,
+			)
+			lines = append(lines, s.text.Render(truncateText(line, max(1, width-6))))
+		}
+		if hidden := len(host.Disks) - diskLimit; hidden > 0 {
+			lines = append(lines, s.muted.Render(fmt.Sprintf("+%d more · Actions → Storage shows all", hidden)))
+		}
+	}
+	lines = append(lines, "")
+
 	tools := strings.Join(host.Tools, " · ")
+	commands := commandsForTarget(host.Target)
+	lines = append(lines, s.focus.Render("TOOLS & COMMANDS"))
 	if tools != "" {
 		lines = append(lines, s.text.Render("Tools    ")+s.muted.Render(tools))
 	}
-	commands := commandsForTarget(host.Target)
-	lines = append(lines,
-		"",
-		s.focus.Render("SAVED COMMANDS"),
-		s.muted.Render("Remote commands · always confirmed"),
-	)
 	if len(commands) == 0 {
-		lines = append(lines,
-			s.text.Render("None configured"),
-			s.muted.Render("[a] configure · examples in YAML"),
-		)
+		lines = append(lines, s.muted.Render("No saved commands · configure from Actions"))
 	} else {
-		for _, command := range commands {
+		commandLimit := min(2, len(commands))
+		for _, command := range commands[:commandLimit] {
 			line := command.Name + "  " + command.Description
 			lines = append(lines, s.text.Render(truncateText(line, max(1, width-6))))
 		}
-		lines = append(lines, s.muted.Render("[a] choose or edit commands"))
+		if hidden := len(commands) - commandLimit; hidden > 0 {
+			lines = append(lines, s.muted.Render(fmt.Sprintf("+%d more commands", hidden)))
+		}
+		lines = append(lines, s.muted.Render("[a] choose an action"))
 	}
 	content := strings.Join(lines, "\n")
 	return s.panel.BorderLeft(false).BorderTop(false).BorderRight(false).BorderBottom(false).
 		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).Render(content)
+}
+
+func (m dashboardModel) compactDetailView(s dashboardStyles, width, height int) string {
+	host := m.selectedHost()
+	if host.Target == "" {
+		return ""
+	}
+	name := displayName(host)
+	gpu := "GPU unknown"
+	if len(host.GPUs) > 0 {
+		gpu = host.GPUs[0]
+		if len(host.GPUs) > 1 {
+			gpu += fmt.Sprintf(" +%d", len(host.GPUs)-1)
+		}
+	}
+	storage := valueOr(host.Disk, "storage not scanned")
+	if len(host.Disks) > 0 {
+		storage = fmt.Sprintf("%d mounted filesystems", len(host.Disks))
+	}
+	lines := []string{
+		s.title.Render(name) + s.muted.Render("  "+host.Target),
+		m.statusText(s, host.Reachability) + s.muted.Render("  ·  used "+relativeTime(host.LastUsed, m.now)),
+		s.text.Render("System  ") + s.muted.Render(strings.Join([]string{
+			valueOr(host.OS, "OS unknown"), valueOr(host.Memory, "RAM unknown"),
+		}, " · ")),
+		s.text.Render("GPU     ") + s.muted.Render(gpu),
+		s.text.Render("Storage ") + s.muted.Render(storage),
+	}
+	content := strings.Join(lines, "\n")
+	return s.panel.BorderLeft(false).BorderRight(false).BorderBottom(false).
+		Width(max(1, width-1)).Height(max(1, height-1)).Padding(0, 1).Render(content)
 }
 
 func (m dashboardModel) compactView(s dashboardStyles, width, height int) string {
@@ -1542,17 +1775,27 @@ func (m dashboardModel) confirmCommandView() string {
 	s := m.styles()
 	selection := m.confirmAction
 	width := min(max(48, m.width-16), 76)
+	title := "CONFIRM SAVED COMMAND"
+	explanation := "Review the exact target and command before Nexus runs it."
+	warning := "This command runs on the remote host with your SSH access."
+	runLabel := "[y] run"
+	if selection.Action == actionCopyKey {
+		title = "CONFIRM COPY SSH KEY"
+		explanation = "Nexus will add your default public key to this host."
+		warning = "This changes the remote authorized_keys file and may ask for your password."
+		runLabel = "[y] continue"
+	}
 	lines := []string{
-		s.warning.Render("CONFIRM SAVED COMMAND"),
-		s.muted.Render("Review the exact target and command before Nexus runs it."),
+		s.warning.Render(title),
+		s.muted.Render(explanation),
 		"",
 		s.text.Render("Name     ") + s.focus.Render(valueOr(selection.Command.Name, "unnamed")),
 		s.text.Render("Target   ") + s.muted.Render(selection.Host),
 		s.text.Render("Command  ") + s.text.Render(selection.Command.Command),
 		"",
-		s.warning.Render("This command runs on the remote host with your SSH access."),
+		s.warning.Render(warning),
 		"",
-		s.text.Render("[y] run") + s.muted.Render("   [esc] cancel"),
+		s.text.Render(runLabel) + s.muted.Render("   [esc] cancel"),
 	}
 	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
@@ -1835,6 +2078,7 @@ func (a *app) runDashboard() error {
 					model.hosts[index].Reachability = result
 				}
 			}
+			model.sortHostsByAvailabilityKeeping(resumeTarget)
 		}
 		for index := range model.filtered {
 			if model.hosts[model.filtered[index]].Target == resumeTarget {
@@ -1882,7 +2126,9 @@ func actionLabel(action dashboardAction) string {
 	case actionInfo:
 		return "System snapshot"
 	case actionStorage:
-		return "Storage tool"
+		return "Storage"
+	case actionCopyKey:
+		return "SSH key setup"
 	case actionCustom:
 		return "Saved command"
 	case actionConfig:
@@ -1898,6 +2144,15 @@ func (a *app) executeDashboardSelection(selection dashboardSelection) error {
 	}
 	if selection.Action == actionCustom {
 		err := runConfiguredRemoteCommand(selection.Host, selection.Command.Command)
+		if err == nil {
+			if stateErr := a.recordSuccess(selection.Host); stateErr != nil {
+				logVerbose("failed to record host activity: %v", stateErr)
+			}
+		}
+		return err
+	}
+	if selection.Action == actionCopyKey {
+		err := runSSHCopyID(selection.Host)
 		if err == nil {
 			if stateErr := a.recordSuccess(selection.Host); stateErr != nil {
 				logVerbose("failed to record host activity: %v", stateErr)
@@ -1993,7 +2248,9 @@ func runConfiguredRemoteCommandCaptured(target, command string) (string, error) 
 		return "", errors.New("configured command is empty or contains unsafe control characters")
 	}
 	remote := remoteShellCommand("sh", command)
-	cmd, err := buildSSHCommand(context.Background(), target, false, remote)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd, err := buildSSHCommand(ctx, target, false, remote)
 	if err != nil {
 		return "", err
 	}
@@ -2001,6 +2258,9 @@ func runConfiguredRemoteCommandCaptured(target, command string) (string, error) 
 	cmd.Stdout = output
 	cmd.Stderr = output
 	err = cmd.Run()
+	if ctx.Err() != nil {
+		return output.String(), fmt.Errorf("remote command timed out: %w", ctx.Err())
+	}
 	return output.String(), err
 }
 

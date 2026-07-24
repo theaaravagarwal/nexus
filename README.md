@@ -9,13 +9,14 @@ CLI for SSH sessions and remote file sync workflows.
 - Open the `rip`-inspired host dashboard by running `nexus` with no command.
 - SSH into `user@host`, `user@host:port`, IPv4, or bracketed IPv6 targets.
 - Pull and push files/directories over `rsync` with interactive path selection.
-- Inspect remote CPU, memory, network, and storage with portable command fallbacks.
+- Inspect remote CPU, GPU, decimal RAM, network, and every mounted filesystem with portable fallbacks.
 - Host history persisted in `~/.config/nexus/hosts.json`.
-- Zoxide-style frecency ordering puts frequently and recently used hosts first.
+- Reachable hosts sort first, with zoxide-style frequency and recency ordering inside each status group.
 - Saved-port reachability and TCP latency without background SSH authentication.
 - Rich responsive workspace with host dossiers, topology, command palette, and contextual help.
 - Seven built-in themes plus semantic color overrides in YAML.
 - Confirmed custom commands inherited globally, by tag, or per host.
+- Install your local SSH key through a confirmed action that respects the saved port.
 - Remote indexing modes:
   - `lazy` (default): shallow listing for faster navigation.
   - `full`: deeper recursive listing (depth controlled via config).
@@ -151,10 +152,10 @@ nexus --port 2200 ssh user@example-host
 | `esc` | Go back or cancel the current context |
 | `q` | Quit from the workspace |
 
-The Actions list contains pull, push, selected/all connection checks, background
-system refresh, system/network/storage tools, fleet, themes, configuration, and
-saved commands. This keeps the workspace key map small instead of assigning a
-second shortcut to every feature.
+The Actions list contains pull, push, SSH key installation, selected/all
+connection checks, background system refresh, system/network/storage tools,
+fleet, themes, configuration, and saved commands. Storage inventories and
+ordinary saved-command output stay in a scrollable Nexus result view.
 
 ## Configuration
 
@@ -218,6 +219,9 @@ For themes, press `a`, choose **Themes**, move with `j/k`, then press
 `enter` to use one for the current session or `s` to save it as the default.
 Actions with the highest local usage count rise to the top of the menu; unused
 actions retain their predictable default order.
+Hosts are grouped with reachable machines first, then ordered by frequency and
+recency within each group. Probe completion preserves the selected target and
+active host filter.
 
 Useful configuration commands:
 
@@ -261,7 +265,7 @@ Config keys:
 - `theme.go`: semantic built-in themes shared across terminal surfaces.
 - `state.go`: atomic frecency and remote-summary state persistence.
 - `probes.go`: bounded saved-port DNS/TCP reachability checks.
-- `metadata.go`: explicit non-interactive remote system-summary cache refresh.
+- `metadata.go`: bounded explicit OS, CPU, GPU, RAM, and mounted-filesystem cache refresh.
 - `diagnostics.go`: portable remote inspection command selection.
 - `help.go`: adaptive colored help renderer.
 - `performance.go`: SSH multiplexing and rsync capability detection.

@@ -65,6 +65,17 @@ func TestRemoteProbeTreatsShellCommandMissAsFallback(t *testing.T) {
 	}
 }
 
+func TestRemoteShellRetryDoesNotRepeatRealToolFailure(t *testing.T) {
+	exitOne := exec.Command("sh", "-c", "exit 1").Run()
+	exitMissing := exec.Command("sh", "-c", "exit 127").Run()
+	if shouldRetryRemoteShell(exitOne) {
+		t.Fatal("exit 1 should not rerun a command through another shell")
+	}
+	if !shouldRetryRemoteShell(exitMissing) {
+		t.Fatal("exit 127 should try a portable shell fallback")
+	}
+}
+
 func TestProbeSkipsLoginProfilesAndFallsBackWhenToolsAreMissing(t *testing.T) {
 	binDir := t.TempDir()
 	fakeSSH := filepath.Join(binDir, "ssh")

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +47,6 @@ func TestDashboardActionListDispatchesExpectedCommands(t *testing.T) {
 		action dashboardAction
 	}{
 		{"network", actionNet},
-		{"storage", actionStorage},
 	}
 	for _, tc := range tests {
 		model := newDashboardModel([]string{"alice@one:2222"})
@@ -102,6 +103,69 @@ func TestDashboardSystemRefreshStaysInsideTUI(t *testing.T) {
 	}
 }
 
+func TestDashboardStorageOutputStaysInsideTUI(t *testing.T) {
+	binDir := t.TempDir()
+	sshPath := filepath.Join(binDir, "ssh")
+	script := "#!/bin/sh\nprintf 'DISK=/dev/root\\t/\\t500000000000\\t500000000000\\t1000000000000\\nDISK=/dev/data\\t/data\\t1000000000000\\t1000000000000\\t2000000000000\\n'\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	model := newDashboardModel([]string{"alice@one:2222"})
+	model, cmd := chooseDashboardAction(t, model, "storage")
+	if cmd == nil || model.done || !model.commandRunning || model.commandResult == nil {
+		t.Fatalf("storage escaped TUI: cmd=%v model=%#v", cmd, model)
+	}
+	updated, _ := model.Update(cmd())
+	model = updated.(dashboardModel)
+	view := ansiCSI.ReplaceAllString(model.View(), "")
+	for _, want := range []string{
+		"COMMAND OUTPUT", "Storage", "/dev/root", "/data", "500 GB / 1 TB", "1 TB / 2 TB",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("storage result missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestDashboardStorageFailureStaysRecoverableInsideTUI(t *testing.T) {
+	binDir := t.TempDir()
+	sshPath := filepath.Join(binDir, "ssh")
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nprintf 'permission denied\\n' >&2\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	model := newDashboardModel([]string{"alice@one"})
+	model, cmd := chooseDashboardAction(t, model, "storage")
+	updated, _ := model.Update(cmd())
+	model = updated.(dashboardModel)
+	view := ansiCSI.ReplaceAllString(model.View(), "")
+	if model.done || model.commandRunning || !strings.Contains(view, "storage scan failed") ||
+		!strings.Contains(view, "permission denied") || !strings.Contains(view, "[r] run again") {
+		t.Fatalf("storage failure was not recoverable in TUI:\n%s", view)
+	}
+}
+
+func TestDashboardCopyKeyRequiresConfirmation(t *testing.T) {
+	model := newDashboardModel([]string{"alice@example.com:6023"})
+	model, cmd := chooseDashboardAction(t, model, "copy key")
+	if cmd != nil || !model.confirmOpen || model.done {
+		t.Fatalf("copy key did not stay in confirmation: cmd=%v model=%#v", cmd, model)
+	}
+	view := ansiCSI.ReplaceAllString(model.View(), "")
+	for _, want := range []string{"CONFIRM COPY SSH KEY", "alice@example.com:6023", "ssh-copy-id -p 6023 alice@example.com"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("copy-key confirmation missing %q:\n%s", want, view)
+		}
+	}
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.done || model.choice.Action != actionCopyKey {
+		t.Fatalf("confirmed copy key did not hand off terminal: cmd=%v choice=%#v", cmd, model.choice)
+	}
+}
+
 func TestDashboardProbeResultsStreamPerHost(t *testing.T) {
 	previous := loadedConfig.Reachability.Concurrency
 	loadedConfig.Reachability.Concurrency = 1
@@ -119,6 +183,48 @@ func TestDashboardProbeResultsStreamPerHost(t *testing.T) {
 	model = updated.(dashboardModel)
 	if model.probing || model.probeComplete != 2 || model.hosts[1].Reachability.Status != reachTimeout || cmd == nil {
 		t.Fatalf("final streamed result=%#v cmd=%v", model, cmd)
+	}
+}
+
+func TestDashboardOrdersOnlineHostsFirstAfterProbeBatch(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	state := nexusState{Hosts: map[string]hostActivity{
+		"offline@one": {Score: 20, LastUsed: now},
+		"fast@two":    {Score: 5, LastUsed: now},
+		"slow@three":  {Score: 1, LastUsed: now},
+	}}
+	model := newDashboardModelWithState(
+		[]string{"offline@one", "fast@two", "slow@three"}, state, now,
+	)
+	model.probeQueue = nil
+	model.probeTargets = map[string]bool{
+		"offline@one": true, "fast@two": true, "slow@three": true,
+	}
+	model.probeTotal = 3
+	model.probeComplete = 0
+	model.probing = true
+	model.filtering = true
+	model.query = "@"
+	model.applyFilter()
+	model.cursor = 2
+	selected := model.selectedTarget()
+
+	for _, result := range []reachabilityResult{
+		{Target: "slow@three", Status: reachOnline, Latency: 20 * time.Millisecond},
+		{Target: "offline@one", Status: reachTimeout},
+		{Target: "fast@two", Status: reachOnline, Latency: 4 * time.Millisecond},
+	} {
+		updated, _ := model.Update(probeTargetMsg(result))
+		model = updated.(dashboardModel)
+	}
+	got := []string{model.hosts[0].Target, model.hosts[1].Target, model.hosts[2].Target}
+	want := []string{"fast@two", "slow@three", "offline@one"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("host order=%v, want %v", got, want)
+	}
+	if model.selectedTarget() != selected || len(model.filtered) != 3 || model.query != "@" {
+		t.Fatalf("selection/filter changed during reorder: selected=%q filtered=%v query=%q",
+			model.selectedTarget(), model.filtered, model.query)
 	}
 }
 
@@ -207,7 +313,7 @@ func TestDashboardActionsAreRankedByRecordedUsage(t *testing.T) {
 	if commands[0].Action != actionStorage || commands[1].Action != actionSSH {
 		t.Fatalf("actions were not usage-ranked: %#v", commands[:2])
 	}
-	if commands[2].Action != actionPull || commands[3].Action != actionPush {
+	if commands[2].Action != actionCopyKey || commands[3].Action != actionPull {
 		t.Fatalf("unused actions lost their stable default order: %#v", commands[2:4])
 	}
 }
@@ -258,7 +364,7 @@ func TestDashboardActionListExposesEveryOperation(t *testing.T) {
 	}
 	for _, action := range []dashboardAction{
 		actionSSH, actionPull, actionPush, actionInfo, actionProbe, actionProbeAll,
-		actionTop, actionNet, actionStorage, actionFleet, actionThemes, actionConfig,
+		actionTop, actionNet, actionStorage, actionCopyKey, actionFleet, actionThemes, actionConfig,
 	} {
 		if !actions[action] {
 			t.Fatalf("action %q is not discoverable from Actions", action)
@@ -464,7 +570,15 @@ func TestDashboardTopologyToggleChangesWideWorkspace(t *testing.T) {
 func TestDashboardViewsRemainInformativeAcrossWidths(t *testing.T) {
 	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
 	state := nexusState{Hosts: map[string]hostActivity{
-		"alice@one:2222": {Score: 3, LastUsed: now.Add(-time.Hour), OS: "Ubuntu 24.04", Tools: []string{"btop", "duf"}},
+		"alice@one:2222": {
+			Score: 3, LastUsed: now.Add(-time.Hour), OS: "Ubuntu 24.04",
+			GPUs: []string{"NVIDIA RTX 4090 · 25.8 GB VRAM"}, Memory: "34.4 GB",
+			Disks: []diskUsage{
+				{Filesystem: "/dev/root", Mountpoint: "/", UsedBytes: 500_000_000_000, TotalBytes: 1_000_000_000_000},
+				{Filesystem: "/dev/data", Mountpoint: "/data", UsedBytes: 1_000_000_000_000, TotalBytes: 2_000_000_000_000},
+			},
+			Tools: []string{"btop", "duf"},
+		},
 	}}
 	model := newDashboardModelWithState([]string{"alice@one:2222", "bob@two"}, state, now)
 	model.hosts[0].Reachability = reachabilityResult{Target: "alice@one:2222", Status: reachOnline, Latency: 24 * time.Millisecond}
@@ -478,7 +592,7 @@ func TestDashboardViewsRemainInformativeAcrossWidths(t *testing.T) {
 			}
 		}
 		if width == 120 {
-			for _, want := range []string{"SYSTEM", "SAVED COMMANDS"} {
+			for _, want := range []string{"SYSTEM", "NVIDIA RTX 4090", "34.4 GB", "STORAGE", "/data", "TOOLS & COMMANDS"} {
 				if !strings.Contains(view, want) {
 					t.Fatalf("wide layout missing %q:\n%s", want, view)
 				}
@@ -486,6 +600,13 @@ func TestDashboardViewsRemainInformativeAcrossWidths(t *testing.T) {
 			for _, unwanted := range []string{"FLEET CONSTELLATION", "QUICK ACTIONS", "STATUS"} {
 				if strings.Contains(view, unwanted) {
 					t.Fatalf("wide layout retained clutter %q:\n%s", unwanted, view)
+				}
+			}
+		}
+		if width == 78 {
+			for _, want := range []string{"System", "NVIDIA RTX 4090", "34.4 GB", "2 mounted filesystems"} {
+				if !strings.Contains(view, want) {
+					t.Fatalf("medium layout missing %q:\n%s", want, view)
 				}
 			}
 		}
@@ -516,6 +637,33 @@ func TestDashboardRenderStaysWithinTerminalBounds(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestDashboardLargeDiskInventoryUsesBoundedSummary(t *testing.T) {
+	disks := make([]diskUsage, 20)
+	for index := range disks {
+		disks[index] = diskUsage{
+			Filesystem: fmt.Sprintf("/dev/disk%d", index),
+			Mountpoint: fmt.Sprintf("/mnt/volume-%02d", index),
+			UsedBytes:  500_000_000_000,
+			TotalBytes: 1_000_000_000_000,
+		}
+	}
+	now := time.Now()
+	state := nexusState{Hosts: map[string]hostActivity{
+		"alice@one": {Score: 1, LastUsed: now, Disks: disks},
+	}}
+	model := newDashboardModelWithState([]string{"alice@one"}, state, now)
+	model.width, model.height = 100, 24
+	view := ansiCSI.ReplaceAllString(model.View(), "")
+	if !strings.Contains(view, "more · Actions → Storage shows all") {
+		t.Fatalf("large inventory did not explain progressive disclosure:\n%s", view)
+	}
+	assertTerminalBounds(t, model.View(), 100, 24, "large disk inventory")
+	full := renderStorageInventory(disks)
+	if !strings.Contains(full, "/mnt/volume-00") || !strings.Contains(full, "/mnt/volume-19") {
+		t.Fatalf("full storage inventory omitted mounted filesystems:\n%s", full)
 	}
 }
 

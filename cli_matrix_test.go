@@ -227,7 +227,7 @@ func TestCLIOutputContracts(t *testing.T) {
 	}{
 		{[]string{"--version"}, []string{"nexus dev"}},
 		{[]string{"version"}, []string{"nexus dev", runtimePlatform()}},
-		{[]string{"doctor"}, []string{"ssh", "rsync", "fzf", "config", "history", "state", "theme"}},
+		{[]string{"doctor"}, []string{"ssh", "rsync", "fzf", "ssh-copy-id", "config", "history", "state", "theme"}},
 		{[]string{"config", "path"}, []string{fixture.configFile}},
 		{[]string{"config", "show"}, []string{"theme: nexus", "name: uptime"}},
 		{[]string{"theme", "list"}, []string{"catppuccin", "dracula", "gruvbox", "mono", "nexus", "nord", "terminal"}},
@@ -316,7 +316,7 @@ func newCLIMatrixFixture(t *testing.T) cliMatrixFixture {
 	writeExecutable(t, filepath.Join(binDir, "ssh"), `#!/bin/sh
 printf '%s\n' "$*" >> "$NEXUS_FAKE_LOG"
 case "$*" in
-  *"OS="*"TOOLS="*) printf 'OS=Test Linux\nCPU=Test CPU\nMEMORY=16 GiB\nDISK=5 / 20 GiB\nTOOLS=top,df\n'; exit 0 ;;
+  *"OS="*"TOOLS="*) printf 'OS=Test Linux\nCPU=Test CPU\nMEMORY_BYTES=17179869184\nGPU=Test GPU\nDISK=/dev/root\t/\t5000000000\t15000000000\t20000000000\nTOOLS=top,df\n'; exit 0 ;;
   *"sudo -n true"*) exit 1 ;;
   *"for cmd in "*"fastfetch"*) exit 127 ;;
   *"for cmd in "*"iftop"*) printf 'ip\n'; exit 0 ;;

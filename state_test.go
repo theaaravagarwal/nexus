@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -87,5 +88,41 @@ func TestRecordActionUsePersistsCounts(t *testing.T) {
 	}
 	if got := state.Actions[string(actionStorage)]; got != 3 {
 		t.Fatalf("storage action count=%d, want 3", got)
+	}
+}
+
+func TestLoadStateKeepsBackwardCompatibilityAndStructuredHardware(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{"version":1,"hosts":{"alice@example.com":{"score":2,"last_used":"2026-07-23T12:00:00Z","memory":"16 GiB","disk":"5 / 20 GiB"}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := state.Hosts["alice@example.com"]
+	if entry.Memory != "16 GiB" || entry.Disk != "5 / 20 GiB" || state.Actions == nil {
+		t.Fatalf("legacy state changed during load: %#v", state)
+	}
+
+	entry.Memory = "17.2 GB"
+	entry.GPUs = []string{"Example GPU"}
+	entry.Disks = []diskUsage{{
+		Filesystem: "/dev/root", Mountpoint: "/",
+		UsedBytes: 5_000_000_000, AvailableBytes: 15_000_000_000, TotalBytes: 20_000_000_000,
+	}}
+	state.Hosts["alice@example.com"] = entry
+	if err := saveState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reloaded.Hosts["alice@example.com"]
+	if got.Memory != "17.2 GB" || !slices.Equal(got.GPUs, []string{"Example GPU"}) ||
+		len(got.Disks) != 1 || got.Disks[0].Mountpoint != "/" {
+		t.Fatalf("structured hardware did not round-trip: %#v", got)
 	}
 }

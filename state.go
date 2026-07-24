@@ -19,14 +19,16 @@ const (
 )
 
 type hostActivity struct {
-	Score    float64   `json:"score"`
-	LastUsed time.Time `json:"last_used"`
-	OS       string    `json:"os,omitempty"`
-	CPU      string    `json:"cpu,omitempty"`
-	Memory   string    `json:"memory,omitempty"`
-	Disk     string    `json:"disk,omitempty"`
-	Tools    []string  `json:"tools,omitempty"`
-	Updated  time.Time `json:"updated,omitempty"`
+	Score    float64     `json:"score"`
+	LastUsed time.Time   `json:"last_used"`
+	OS       string      `json:"os,omitempty"`
+	CPU      string      `json:"cpu,omitempty"`
+	GPUs     []string    `json:"gpus,omitempty"`
+	Memory   string      `json:"memory,omitempty"`
+	Disk     string      `json:"disk,omitempty"`
+	Disks    []diskUsage `json:"disks,omitempty"`
+	Tools    []string    `json:"tools,omitempty"`
+	Updated  time.Time   `json:"updated,omitempty"`
 }
 
 type nexusState struct {

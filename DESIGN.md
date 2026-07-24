@@ -38,8 +38,9 @@ The default `nexus` theme is anchored by:
 ## Layout and interaction
 
 - Narrow: host picker with compact selected-host context and a one-line action hint.
-- Medium: host list plus stacked details.
-- Wide: two-region host list and selected-host summary. Fleet, themes, saved
+- Medium: host list plus a compact stacked selected-host summary.
+- Wide: two-region host list and selected-host summary organized as identity,
+  system, storage, and tools/commands. Fleet, themes, saved
   commands, and deeper actions appear only when requested.
 - The workspace uses six canonical keys: `j/k` move, `Enter` connects, `/`
   finds, `a` opens every action, `h` explains every key, and `q` quits.
@@ -48,6 +49,8 @@ The default `nexus` theme is anchored by:
 - Selection and focus remain visible without relying on color.
 - Reachability is visually encoded as `●` online, `!` refused, `×` unavailable,
   and `◌` checking, so state survives monochrome terminals.
+- Completed probe batches group online hosts first and retain frecency as the
+  suborder without moving selection away from the active target.
 - Fleet is an optional endpoint overview and explicitly describes TCP
   reachability without implying discovery, authentication, or dependency links.
 - Finite scans update inside the TUI. Pull/push path discovery uses a native
@@ -56,6 +59,9 @@ The default `nexus` theme is anchored by:
 - Saved commands display bounded, sanitized stdout/stderr in a scrollable TUI
   result view. Only commands explicitly marked `interactive` temporarily own
   the terminal.
+- Static storage inventories stay in the same result view. Cached detail uses
+  decimal GB/TB and a bounded mounted-filesystem summary; the Storage action
+  exposes the complete inventory.
 - The footer shows the four primary workspace actions and points to `h` for the
   complete key reference. Active work, completion, and recovery replace that
   secondary hint when relevant.

@@ -58,7 +58,7 @@ func (a *app) newDoctorCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			requiredMissing := false
-			for _, binary := range []string{"ssh", "rsync", "fzf"} {
+			for _, binary := range []string{"ssh", "rsync", "fzf", "ssh-copy-id"} {
 				path, err := exec.LookPath(binary)
 				status := "ok"
 				if err != nil {
@@ -70,7 +70,7 @@ func (a *app) newDoctorCmd() *cobra.Command {
 				if path != "" {
 					status += " (" + path + ")"
 				}
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-8s %s\n", binary, status)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-12s %s\n", binary, status)
 			}
 			configMode := "unknown"
 			if info, err := os.Stat(a.configFile); err == nil {
