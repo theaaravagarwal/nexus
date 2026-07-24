@@ -22,6 +22,11 @@ vendor/
 .env.*
 *.local
 
+# Local project metadata and personal notes
+.github/
+.impeccable/
+*.md
+
 # Logs
 *.log
 
