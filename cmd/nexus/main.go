@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"os"
 
-	"nexus/internal/nexus"
+	"nexus/internal/app"
 )
 
 func main() {
-	if err := nexus.Execute(); err != nil {
+	if err := app.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

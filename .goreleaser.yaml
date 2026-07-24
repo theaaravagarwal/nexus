@@ -20,9 +20,9 @@ builds:
     ldflags:
       - >-
         -s -w
-        -X nexus/internal/nexus.version={{ .Version }}
-        -X nexus/internal/nexus.commit={{ .Commit }}
-        -X nexus/internal/nexus.date={{ .Date }}
+        -X nexus/internal/app.version={{ .Version }}
+        -X nexus/internal/app.commit={{ .Commit }}
+        -X nexus/internal/app.date={{ .Date }}
 
 archives:
   - id: default

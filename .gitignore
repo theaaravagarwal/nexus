@@ -22,10 +22,19 @@ vendor/
 .env.*
 *.local
 
-# Local project metadata and personal notes
-.github/
+# Local design artifacts and personal notes
 .impeccable/
 *.md
+!README.md
+!docs/
+!docs/*.md
+
+# Keep only the automation used by the public repository
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/ci.yml
+!.github/workflows/release.yml
 
 # Logs
 *.log
