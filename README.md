@@ -63,13 +63,13 @@ Clone and build:
 ```bash
 git clone https://github.com/theaaravagarwal/nexus.git
 cd nexus
-go install .
+go install ./cmd/nexus
 ```
 
 Or build a local binary:
 
 ```bash
-go build -o bin/nexus .
+go build -o bin/nexus ./cmd/nexus
 ```
 
 ## Quick Start
@@ -272,23 +272,16 @@ Config keys:
 
 ## Repository Layout
 
-- `main.go`: active CLI entrypoint and command wiring.
-- `connection.go`: validated target parsing and canonical history identities.
-- `dashboard.go`: Bubble Tea host/action dashboard.
-- `config.go`: private YAML configuration, profiles, command inheritance, and sanitization.
-- `theme.go`: semantic built-in themes shared across terminal surfaces.
-- `state.go`: atomic frecency and remote-summary state persistence.
-- `probes.go`: bounded saved-port DNS/TCP reachability checks.
-- `metadata.go`: bounded explicit OS, CPU, GPU, RAM, and mounted-filesystem cache refresh.
-- `diagnostics.go`: portable remote inspection command selection.
-- `help.go`: adaptive colored help renderer.
-- `performance.go`: SSH multiplexing and rsync capability detection.
-- `cmd/`: alternate modular command package (currently not the active entrypoint).
-- `internal/hosts`: host validation and persisted host-store helpers.
-- `internal/remote`: SSH-based remote operations.
-- `internal/transfer`: rsync transfer wrappers.
-- `internal/ui`: fzf-backed interactive selection.
-- `internal/pathutil`: local path expansion/normalization helpers.
+- `cmd/nexus`: the thin executable entrypoint.
+- `internal/nexus`: the application, grouped by responsibility into CLI,
+  connection, configuration, diagnostics, dashboard, theme, state, and transfer
+  source files with colocated tests.
+- `.github`: CI, security, dependency, issue, and release automation.
+- Root documentation and release configuration stay visible to contributors.
+
+Go projects conventionally use `cmd` and `internal` directly rather than a
+generic `src` directory. This keeps the public executable obvious and prevents
+application internals from becoming importable API by accident.
 
 ## Operational Notes
 

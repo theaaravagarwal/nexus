@@ -49,6 +49,14 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Activity output and the latest operation remain inside Nexus, with only a concise previous-session summary persisted.
 - Storage views filter pseudo-filesystems, Snap/loop mounts, runtime mounts, and platform plumbing while retaining root, physical, external, WSL drive-letter, dataset, and network volumes.
 - Device-first storage rows now include responsive usage bars and pressure-aware theme colors.
+- The repository now uses a conventional `cmd/nexus` executable and
+  `internal/nexus` application layout, replacing the duplicate prototype
+  command tree and root-level Go source sprawl.
+- Opaque and transparent themes now resolve through one semantic path across
+  dashboard panels, overlays, previews, help, and FZF; transparent mode no
+  longer leaks elevated backgrounds and retains a visible non-color selection.
+- Invalid custom theme roles and color values now fail with actionable
+  configuration errors instead of rendering inconsistently.
 
 ## [0.1.0] - 2026-07-23
 
