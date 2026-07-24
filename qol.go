@@ -81,8 +81,9 @@ func (a *app) newDoctorCmd() *cobra.Command {
 				stateStatus = "invalid: " + sanitizeTerminalText(err.Error())
 			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-				"config   %s (%s)\nhistory  %s\nstate    %s (%s)\ntheme    %s\n",
-				a.configFile, configMode, a.hostsFile, a.stateFile, stateStatus, activeTheme().Name)
+				"config   %s (%s)\nhistory  %s\nstate    %s (%s)\ntheme    %s\nworkspace %s\npins     %d configured, %d unresolved\n",
+				a.configFile, configMode, a.hostsFile, a.stateFile, stateStatus, activeTheme().Name,
+				loadedConfig.UI.Workspace, len(loadedConfig.UI.PinnedActions), len(unresolvedPinnedActions(loadedConfig)))
 			if requiredMissing {
 				return fmt.Errorf("required dependency missing: ssh")
 			}

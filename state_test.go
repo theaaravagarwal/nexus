@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -124,5 +125,81 @@ func TestLoadStateKeepsBackwardCompatibilityAndStructuredHardware(t *testing.T) 
 	if got.Memory != "17.2 GB" || !slices.Equal(got.GPUs, []string{"Example GPU"}) ||
 		len(got.Disks) != 1 || got.Disks[0].Mountpoint != "/" {
 		t.Fatalf("structured hardware did not round-trip: %#v", got)
+	}
+}
+
+func TestLatestOperationPersistsSummaryWithoutSessionOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	started := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	want := operationSummary{
+		Action:     string(actionStorage),
+		Label:      "Storage",
+		Host:       "alice@example.com:2222",
+		Status:     "success",
+		Summary:    "12 filesystems inspected",
+		StartedAt:  started,
+		FinishedAt: started.Add(750 * time.Millisecond),
+		Duration:   750 * time.Millisecond,
+	}
+	if err := recordLatestOperation(path, want); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	latest, ok := document["latest_operation"].(map[string]any)
+	if !ok {
+		t.Fatalf("latest operation missing from state: %s", raw)
+	}
+	if _, exists := latest["output"]; exists {
+		t.Fatalf("remote output must remain session-only: %s", raw)
+	}
+	state, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LatestOperation == nil || *state.LatestOperation != want {
+		t.Fatalf("latest operation did not round-trip: %#v", state.LatestOperation)
+	}
+}
+
+func TestRunningOperationIsNotPersisted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := recordLatestOperation(path, operationSummary{Label: "Check host", Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("running operation unexpectedly created state file: %v", err)
+	}
+}
+
+func TestOlderAsyncOperationCannotReplaceNewerSummary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now()
+	newer := operationSummary{
+		Label: "Storage", Status: "success", StartedAt: now,
+		FinishedAt: now.Add(time.Second),
+	}
+	older := operationSummary{
+		Label: "Refresh info", Status: "success", StartedAt: now.Add(-time.Minute),
+		FinishedAt: now.Add(2 * time.Second),
+	}
+	if err := recordLatestOperation(path, newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordLatestOperation(path, older); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LatestOperation == nil || state.LatestOperation.Label != newer.Label {
+		t.Fatalf("older completion replaced newer operation: %#v", state.LatestOperation)
 	}
 }

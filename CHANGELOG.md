@@ -17,6 +17,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Global, tag-inherited, and per-host custom remote commands with mandatory exact-command confirmation.
 - Host aliases, tags, OS labels, and commands in YAML configuration.
 - Confirmed `ssh-copy-id` setup for selected hosts, including saved non-default ports.
+- Workbench, Console, and Fleet dashboard workspaces with configurable pinned actions.
+- Lightweight selected-host telemetry for uptime, load, memory, network throughput, and GPU health.
 
 ### Changed
 
@@ -39,6 +41,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Remote diagnostics avoid login-shell startup files and use portable system and network summaries when optional probe utilities are unavailable.
 - Interactive SSH sessions distinguish remote shell exit codes from connection failures.
 - CLI validation now rejects unsupported indexing modes, explicit out-of-range ports, and stray command arguments instead of silently accepting them.
+- GPU discovery combines native, WSL, PCI, system-profiler, and host-graphics sources so hybrid and multi-GPU systems are represented together.
+- Ultra-wide dashboards use adaptive host pulse, activity, console, or fleet decks while smaller terminals retain compact layouts.
+- Theme surfaces now paint consistently behind semantic text, selections, overlays, and dashboard panels.
+- Background telemetry uses a single bounded request with quiet exponential backoff and never changes host usage ordering.
+- Activity output and the latest operation remain inside Nexus, with only a concise previous-session summary persisted.
 
 ## [0.1.0] - 2026-07-23
 

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -158,12 +159,93 @@ commands:
 	}
 }
 
+func TestSaveWorkspaceToConfigPreservesThemeAndComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `# keep workspace note
+ui:
+  theme: nord
+  background: opaque
+  workspace: workbench
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveWorkspaceToConfig(path, "fleet"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UI.Workspace != "fleet" || cfg.UI.Theme != "nord" {
+		t.Fatalf("config changed unexpectedly: %#v", cfg.UI)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "# keep workspace note") {
+		t.Fatalf("comment lost:\n%s", saved)
+	}
+}
+
 func TestDefaultConfigIncludesSavedCommandExamples(t *testing.T) {
 	config := defaultConfigYAML()
-	for _, want := range []string{"choose Themes", "disk usage", "journalctl -u app", "exact user@host:port"} {
+	for _, want := range []string{
+		"choose Themes", "workspace: workbench", "pinned_actions:", "add: command:tmux",
+		"id: disk-usage", "disk usage", "journalctl -u app", "exact user@host:port",
+	} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("default config missing %q", want)
 		}
+	}
+}
+
+func TestLoadAppConfigNormalizesWorkspacePinsAndCommandIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `ui:
+  theme: nexus
+  background: opaque
+  workspace: console
+  pinned_actions: [Storage, command:Tmux List, storage, " command:tmux-list "]
+commands:
+  - id: Tmux List
+    name: Tmux List
+    command: tmux ls
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UI.Workspace != "console" {
+		t.Fatalf("workspace=%q", cfg.UI.Workspace)
+	}
+	if !slices.Equal(cfg.UI.PinnedActions, []string{"storage", "command:tmux-list"}) {
+		t.Fatalf("pins=%v", cfg.UI.PinnedActions)
+	}
+	if len(cfg.Commands) != 1 || cfg.Commands[0].ID != "tmux-list" {
+		t.Fatalf("commands=%#v", cfg.Commands)
+	}
+}
+
+func TestLoadAppConfigRejectsUnknownWorkspace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("ui:\n  workspace: enormous\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAppConfig(path); err == nil {
+		t.Fatal("expected unknown workspace to fail")
+	}
+}
+
+func TestUnresolvedPinsAreHarmlessAndDiscoverable(t *testing.T) {
+	cfg := defaultAppConfig()
+	cfg.UI.PinnedActions = []string{"ssh", "command:missing"}
+	if got := unresolvedPinnedActions(cfg); !slices.Equal(got, []string{"command:missing"}) {
+		t.Fatalf("unresolved=%v", got)
 	}
 }
 

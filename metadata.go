@@ -45,6 +45,12 @@ type hostMetadataSnapshot struct {
 	Tools       []string
 }
 
+type gpuProbeRecord struct {
+	Source string
+	ID     string
+	Label  string
+}
+
 type boundedMetadataOutput struct {
 	buffer bytes.Buffer
 }
@@ -86,40 +92,84 @@ fi
 [ -n "$memory_bytes" ] || memory_bytes=$(sysctl -n hw.memsize 2>/dev/null || true)
 printf 'MEMORY_BYTES=%s\n' "$memory_bytes"
 
-gpus=""
-if command -v nvidia-smi >/dev/null 2>&1; then
-  gpus=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null |
+gpu_records=""
+nvidia_smi=$(command -v nvidia-smi 2>/dev/null || true)
+if [ -z "$nvidia_smi" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ]; then
+  nvidia_smi=/usr/lib/wsl/lib/nvidia-smi
+fi
+if [ -n "$nvidia_smi" ]; then
+  records=$("$nvidia_smi" --query-gpu=pci.bus_id,name,memory.total --format=csv,noheader,nounits 2>/dev/null |
     awk -F, '{
-      name=$1
-      memory=$2
+      bus=$1
+      name=$2
+      memory=$3
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", bus)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", memory)
       if (name != "" && memory ~ /^[0-9.]+$/) {
-        printf "%s · %.1f GB VRAM\n", name, memory * 1048576 / 1000000000
+        printf "GPU_RECORD=nvidia\t%s\t%s · %.1f GB VRAM\n", bus, name, memory * 1048576 / 1000000000
       } else if (name != "") {
-        print name
+        printf "GPU_RECORD=nvidia\t%s\t%s\n", bus, name
       }
     }')
+  [ -n "$records" ] && gpu_records="${gpu_records}${gpu_records:+
+}${records}"
 fi
-if [ -z "$gpus" ] && command -v system_profiler >/dev/null 2>&1; then
-  gpus=$(system_profiler SPDisplaysDataType 2>/dev/null |
+if command -v system_profiler >/dev/null 2>&1; then
+  records=$(system_profiler SPDisplaysDataType 2>/dev/null |
     awk -F: '/Chipset Model:/ {
       value=$2
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-      if (value != "") print value
+      if (value != "") {
+        count++
+        printf "GPU_RECORD=system_profiler\t%d\t%s\n", count, value
+      }
     }')
+  [ -n "$records" ] && gpu_records="${gpu_records}${gpu_records:+
+}${records}"
 fi
-if [ -z "$gpus" ] && command -v lspci >/dev/null 2>&1; then
-  gpus=$(lspci 2>/dev/null |
+if command -v lspci >/dev/null 2>&1; then
+  records=$(lspci -D 2>/dev/null |
     awk '/VGA compatible controller:|3D controller:|Display controller:/ {
+      bus=$1
       sub(/^[^ ]+[[:space:]]+[^:]+:[[:space:]]*/, "")
-      if ($0 != "") print
+      if ($0 != "") printf "GPU_RECORD=lspci\t%s\t%s\n", bus, $0
     }')
+  [ -n "$records" ] && gpu_records="${gpu_records}${gpu_records:+
+}${records}"
 fi
-if [ -n "$gpus" ]; then
-  printf '%s\n' "$gpus" | while IFS= read -r gpu; do
-    [ -n "$gpu" ] && printf 'GPU=%s\n' "$gpu"
+case "$(uname -r 2>/dev/null)" in
+  *[Mm]icrosoft*)
+    powershell=""
+    [ -x /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ] &&
+      powershell=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+    if [ -n "$powershell" ]; then
+      records=$("$powershell" -NoProfile -NonInteractive -Command \
+        'Get-CimInstance Win32_VideoController | ForEach-Object { "{0}|{1}" -f $_.PNPDeviceID, $_.Name }' \
+        2>/dev/null | tr -d '\r' |
+        awk -F '|' 'NF >= 2 && $2 != "" {
+          printf "GPU_RECORD=wsl-host\t%s\t%s\n", $1, $2
+        }')
+      [ -n "$records" ] && gpu_records="${gpu_records}${gpu_records:+
+}${records}"
+    fi
+    ;;
+esac
+if [ -z "$gpu_records" ]; then
+  for card in /sys/class/drm/card[0-9]*; do
+    [ -r "$card/device/vendor" ] || continue
+    vendor=$(cat "$card/device/vendor" 2>/dev/null)
+    device=$(cat "$card/device/device" 2>/dev/null)
+    case "$vendor" in
+      0x10de) vendor_name=NVIDIA ;;
+      0x1002) vendor_name=AMD ;;
+      0x8086) vendor_name=Intel ;;
+      *) vendor_name=GPU ;;
+    esac
+    printf 'GPU_RECORD=sysfs\t%s\t%s GPU (%s:%s)\n' "${card##*/}" "$vendor_name" "$vendor" "$device"
   done
+else
+  printf '%s\n' "$gpu_records"
 fi
 
 LC_ALL=C df -Pk 2>/dev/null |
@@ -133,6 +183,7 @@ tools=""
 for tool in btop htop top duf ncdu df nload speedtest nvidia-smi rocm-smi; do
   command -v "$tool" >/dev/null 2>&1 && tools="${tools}${tools:+,}$tool"
 done
+[ -n "$nvidia_smi" ] && case ",$tools," in *,nvidia-smi,*) ;; *) tools="${tools}${tools:+,}nvidia-smi" ;; esac
 printf 'TOOLS=%s\n' "$tools"
 `
 
@@ -200,6 +251,8 @@ func parseMetadata(output string) hostMetadataSnapshot {
 	}
 	output = strings.ReplaceAll(output, "\r\n", "\n")
 	gpus := make(map[string]struct{})
+	gpuRecords := make([]gpuProbeRecord, 0)
+	gpuRecordIDs := make(map[string]struct{})
 	disks := make(map[string]struct{})
 	tools := make(map[string]struct{})
 	for _, line := range strings.Split(output, "\n") {
@@ -234,6 +287,25 @@ func parseMetadata(output string) hostMetadataSnapshot {
 			}
 			gpus[dedupe] = struct{}{}
 			snapshot.GPUs = append(snapshot.GPUs, value)
+		case "GPU_RECORD":
+			fields := strings.SplitN(rawValue, "\t", 3)
+			if len(fields) != 3 || len(gpuRecords) >= maxMetadataGPUs*8 {
+				continue
+			}
+			record := gpuProbeRecord{
+				Source: sanitizeMetadataValue(fields[0]),
+				ID:     sanitizeMetadataValue(fields[1]),
+				Label:  sanitizeMetadataValue(fields[2]),
+			}
+			if record.Source == "" || record.Label == "" {
+				continue
+			}
+			recordKey := strings.ToLower(record.Source + "\x00" + record.ID + "\x00" + record.Label)
+			if _, exists := gpuRecordIDs[recordKey]; exists {
+				continue
+			}
+			gpuRecordIDs[recordKey] = struct{}{}
+			gpuRecords = append(gpuRecords, record)
 		case "DISK":
 			if len(snapshot.Disks) >= maxMetadataDisks {
 				continue
@@ -266,7 +338,72 @@ func parseMetadata(output string) hostMetadataSnapshot {
 			}
 		}
 	}
+	legacyGPUs := make(map[string]struct{}, len(gpus))
+	for label := range gpus {
+		legacyGPUs[label] = struct{}{}
+	}
+	for _, label := range aggregateGPURecords(gpuRecords, max(0, maxMetadataGPUs-len(snapshot.GPUs))) {
+		dedupe := strings.ToLower(label)
+		if _, exists := legacyGPUs[dedupe]; exists {
+			continue
+		}
+		snapshot.GPUs = append(snapshot.GPUs, label)
+	}
 	return snapshot
+}
+
+func aggregateGPURecords(records []gpuProbeRecord, limit int) []string {
+	if limit <= 0 || len(records) == 0 {
+		return nil
+	}
+	type aggregate struct {
+		label        string
+		sourceCounts map[string]int
+		order        int
+	}
+	groups := make(map[string]*aggregate)
+	order := make([]string, 0)
+	for _, record := range records {
+		identity := normalizeGPUIdentity(record.Label)
+		if identity == "" {
+			continue
+		}
+		group, ok := groups[identity]
+		if !ok {
+			group = &aggregate{label: record.Label, sourceCounts: map[string]int{}, order: len(order)}
+			groups[identity] = group
+			order = append(order, identity)
+		}
+		group.sourceCounts[strings.ToLower(record.Source)]++
+		if strings.Contains(strings.ToLower(record.Label), "vram") &&
+			!strings.Contains(strings.ToLower(group.label), "vram") {
+			group.label = record.Label
+		}
+	}
+	result := make([]string, 0, min(limit, len(records)))
+	for _, identity := range order {
+		group := groups[identity]
+		count := 0
+		for _, sourceCount := range group.sourceCounts {
+			count = max(count, sourceCount)
+		}
+		for range count {
+			if len(result) >= limit {
+				return result
+			}
+			result = append(result, group.label)
+		}
+	}
+	return result
+}
+
+func normalizeGPUIdentity(label string) string {
+	label = strings.ToLower(strings.TrimSpace(label))
+	if before, _, found := strings.Cut(label, " · "); found {
+		label = before
+	}
+	label = strings.Join(strings.Fields(label), " ")
+	return label
 }
 
 func parseDiskUsage(value string) (diskUsage, bool) {

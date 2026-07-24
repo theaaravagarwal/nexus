@@ -31,10 +31,22 @@ type hostActivity struct {
 	Updated  time.Time   `json:"updated,omitempty"`
 }
 
+type operationSummary struct {
+	Action     string        `json:"action,omitempty"`
+	Label      string        `json:"label"`
+	Host       string        `json:"host,omitempty"`
+	Status     string        `json:"status"`
+	Summary    string        `json:"summary,omitempty"`
+	StartedAt  time.Time     `json:"started_at,omitempty"`
+	FinishedAt time.Time     `json:"finished_at,omitempty"`
+	Duration   time.Duration `json:"duration,omitempty"`
+}
+
 type nexusState struct {
-	Version int                     `json:"version"`
-	Hosts   map[string]hostActivity `json:"hosts"`
-	Actions map[string]int          `json:"actions,omitempty"`
+	Version         int                     `json:"version"`
+	Hosts           map[string]hostActivity `json:"hosts"`
+	Actions         map[string]int          `json:"actions,omitempty"`
+	LatestOperation *operationSummary       `json:"latest_operation,omitempty"`
 }
 
 func loadState(path string) (nexusState, error) {
@@ -70,6 +82,38 @@ func recordActionUse(path, action string) error {
 		}
 		state.Actions[action]++
 	})
+}
+
+func recordLatestOperation(path string, operation operationSummary) error {
+	operation.Action = boundedStateText(operation.Action, 64)
+	operation.Label = boundedStateText(operation.Label, 128)
+	operation.Host = boundedStateText(operation.Host, 512)
+	operation.Status = boundedStateText(operation.Status, 16)
+	operation.Summary = boundedStateText(operation.Summary, 512)
+	if operation.Label == "" {
+		return nil
+	}
+	if operation.Status == "" || operation.Status == "running" {
+		return nil
+	}
+	return updateState(path, func(state *nexusState) {
+		if state.LatestOperation != nil &&
+			!state.LatestOperation.StartedAt.IsZero() &&
+			operation.StartedAt.Before(state.LatestOperation.StartedAt) {
+			return
+		}
+		snapshot := operation
+		state.LatestOperation = &snapshot
+	})
+}
+
+func boundedStateText(value string, limit int) string {
+	value = strings.TrimSpace(sanitizeTerminalText(value))
+	runes := []rune(value)
+	if len(runes) > limit {
+		value = string(runes[:limit])
+	}
+	return value
 }
 
 func saveState(path string, state nexusState) error {

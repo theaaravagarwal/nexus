@@ -301,6 +301,10 @@ func TestDashboardActionFilterAcceptsSpaces(t *testing.T) {
 }
 
 func TestDashboardActionsAreRankedByRecordedUsage(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+	loadedConfig.UI.PinnedActions = nil
 	state := nexusState{
 		Hosts: map[string]hostActivity{},
 		Actions: map[string]int{
@@ -622,7 +626,12 @@ func TestDashboardRenderStaysWithinTerminalBounds(t *testing.T) {
 		},
 	}}
 	for _, plain := range []bool{true, false} {
-		for _, size := range [][2]int{{20, 6}, {40, 12}, {71, 20}, {72, 20}, {109, 24}, {110, 24}, {120, 25}, {120, 32}} {
+		for _, size := range [][2]int{
+			{20, 6}, {29, 10}, {30, 9}, {30, 10}, {40, 12}, {40, 15}, {40, 16},
+			{71, 20}, {72, 20}, {95, 24},
+			{96, 24}, {109, 24}, {110, 24}, {120, 25}, {120, 32},
+			{149, 32}, {149, 80}, {150, 31}, {150, 32}, {240, 80},
+		} {
 			model := newDashboardModelWithState([]string{"alice@one:2222", "bob@two"}, state, now)
 			model.plain = plain
 			model.width, model.height = size[0], size[1]
@@ -636,6 +645,181 @@ func TestDashboardRenderStaysWithinTerminalBounds(t *testing.T) {
 					t.Fatalf("plain=%v size=%v line=%d width=%d\n%s", plain, size, index, width, view)
 				}
 			}
+		}
+	}
+}
+
+func TestDashboardUltraWideWorkbenchUsesAvailableSpace(t *testing.T) {
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	state := nexusState{
+		Hosts: map[string]hostActivity{
+			"alice@one:2222": {
+				Score: 4, LastUsed: now.Add(-time.Minute), OS: "Ubuntu 26.04",
+				CPU: "Example CPU", GPUs: []string{"Example GPU"}, Memory: "32 GB",
+				Disks: []diskUsage{{
+					Filesystem: "/dev/root", Mountpoint: "/",
+					UsedBytes: 300_000_000_000, TotalBytes: 1_000_000_000_000,
+				}},
+			},
+		},
+		LatestOperation: &operationSummary{
+			Action: string(actionStorage), Label: "Storage", Host: "alice@one:2222",
+			Status: "success", Summary: "All filesystems inspected", Duration: 850 * time.Millisecond,
+		},
+	}
+	model := newDashboardModelWithState([]string{"alice@one:2222", "bob@two"}, state, now)
+	model.plain = true
+	model.width, model.height = 240, 80
+	model.operation.Output = "older output\n/dev/root  300 GB / 1.0 TB"
+	view := model.View()
+	for _, want := range []string{
+		"HOSTS", "SYSTEM", "PINNED & FREQUENT", "HOST PULSE", "ACTIVITY",
+		"All filesystems inspected", "/dev/root", "older output", "[a] open actions",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("ultra-wide layout missing %q:\n%s", want, view)
+		}
+	}
+	assertTerminalBounds(t, view, 240, 80, "ultra-wide workspace")
+}
+
+func TestDashboardUltraWideBreakpointFallsBackCleanly(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		width, height int
+		ultra         bool
+	}{
+		{149, 32, false},
+		{150, 31, true},
+		{150, 25, false},
+		{150, 32, true},
+	} {
+		model := newDashboardModelWithState([]string{"alice@one"}, nexusState{
+			Hosts: map[string]hostActivity{"alice@one": {OS: "Linux"}},
+		}, now)
+		model.plain = true
+		model.width, model.height = tc.width, tc.height
+		view := model.View()
+		if got := strings.Contains(view, "HOST PULSE"); got != tc.ultra {
+			t.Fatalf("size=%dx%d ultra=%v, want %v:\n%s", tc.width, tc.height, got, tc.ultra, view)
+		}
+		assertTerminalBounds(t, view, tc.width, tc.height, "responsive breakpoint")
+	}
+}
+
+func TestDashboardStaleAsyncCompletionDoesNotReplaceLatestOperation(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.startOperation(actionInfo, "Refresh info", "alice@one")
+	staleID := model.operationID
+	model.startOperation(actionStorage, "Storage", "alice@one")
+	latestID := model.operationID
+	model.commandResult = &configuredCommandResult{
+		Action: actionStorage, Host: "alice@one",
+		Command: commandConfig{Name: "Storage"},
+	}
+
+	updated, _ := model.Update(metadataRefreshMsg{
+		Target:      "alice@one",
+		OperationID: staleID,
+		Activity:    hostActivity{OS: "Linux", Updated: time.Now()},
+	})
+	model = updated.(dashboardModel)
+	if model.operation.Label != "Storage" || model.operation.Status != "running" {
+		t.Fatalf("stale metadata completion replaced latest operation: %#v", model.operation)
+	}
+
+	updated, _ = model.Update(configuredCommandMsg{
+		OperationID: latestID,
+		Output:      "/  300 GB / 1 TB",
+	})
+	model = updated.(dashboardModel)
+	if model.operation.Label != "Storage" || model.operation.Status != "success" {
+		t.Fatalf("latest completion was not applied: %#v", model.operation)
+	}
+}
+
+func TestDashboardPinnedActionsLeadInConfiguredOrder(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+	loadedConfig.Commands = sanitizeCommands([]commandConfig{
+		{ID: "tmux", Name: "tmux list", Command: "tmux ls"},
+	})
+	loadedConfig.UI.PinnedActions = []string{"command:tmux", "storage"}
+	model := newDashboardModel([]string{"alice@one"})
+	model.actionUses[string(actionSSH)] = 100
+	commands := model.availableCommands()
+	if len(commands) < 3 || commands[0].Command.ID != "tmux" ||
+		commands[1].Action != actionStorage || commands[2].Action != actionSSH {
+		t.Fatalf("unexpected action order: %#v", commands[:min(4, len(commands))])
+	}
+}
+
+func TestDashboardActivitiesCapAtFiveAndPreserveOutputLines(t *testing.T) {
+	var events []activityEvent
+	for index := 0; index < 7; index++ {
+		events = appendActivity(events, activityEvent{
+			Label:  fmt.Sprintf("task %d", index),
+			Status: "success",
+			Output: "first\nsecond",
+		})
+	}
+	if len(events) != 5 || events[0].Label != "task 2" ||
+		events[4].Output != "first\nsecond" {
+		t.Fatalf("events=%#v", events)
+	}
+}
+
+func TestDashboardAllWorkspaceModesStayResponsive(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	for _, mode := range workspaceModes() {
+		loadedConfig = defaultAppConfig()
+		loadedConfig.UI.Workspace = mode
+		for _, size := range [][2]int{
+			{20, 6}, {40, 12}, {71, 20}, {72, 20}, {95, 24},
+			{96, 24}, {149, 32}, {150, 32}, {240, 80},
+		} {
+			model := newDashboardModel([]string{"alice@one", "bob@two"})
+			model.plain = true
+			model.width, model.height = size[0], size[1]
+			view := model.View()
+			assertTerminalBounds(t, view, size[0], size[1], mode)
+			if size[0] >= 150 && size[1] >= 32 {
+				marker := map[string]string{
+					"workbench": "HOST PULSE",
+					"console":   "OPERATIONS CONSOLE",
+					"fleet":     "FLEET WORKSPACE",
+				}[mode]
+				if !strings.Contains(view, marker) {
+					t.Fatalf("mode=%s size=%v missing %q:\n%s", mode, size, marker, view)
+				}
+			}
+		}
+	}
+}
+
+func TestDashboardThemeStylesPaintPanelTextContinuously(t *testing.T) {
+	for name, theme := range themes {
+		model := newDashboardModel([]string{"alice@one"})
+		model.plain = false
+		model.theme = theme
+		styles := model.styles()
+		if theme.Surface == "" {
+			continue
+		}
+		wantSurface := lipgloss.Color(theme.Surface)
+		for role, style := range map[string]lipgloss.Style{
+			"text": styles.text, "muted": styles.muted, "focus": styles.focus,
+			"live": styles.live, "success": styles.success, "warning": styles.warning,
+			"failure": styles.failure, "panel": styles.panel,
+		} {
+			if got := style.GetBackground(); got != wantSurface {
+				t.Fatalf("theme=%s role=%s background=%v want=%v", name, role, got, wantSurface)
+			}
+		}
+		if got := styles.selected.GetBackground(); got != lipgloss.Color(theme.Elevated) {
+			t.Fatalf("theme=%s selected background=%v", name, got)
 		}
 	}
 }
@@ -669,7 +853,7 @@ func TestDashboardLargeDiskInventoryUsesBoundedSummary(t *testing.T) {
 
 func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 	for _, size := range [][2]int{{40, 16}, {72, 20}, {120, 32}} {
-		for _, overlay := range []string{"help", "commands", "themes", "confirm", "output", "fleet", "transfer"} {
+		for _, overlay := range []string{"help", "commands", "themes", "workspace", "confirm", "output", "fleet", "transfer"} {
 			model := newDashboardModel([]string{"alice@one"})
 			model.width, model.height = size[0], size[1]
 			switch overlay {
@@ -679,6 +863,8 @@ func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 				model.commandOpen = true
 			case "themes":
 				model.openThemePreview()
+			case "workspace":
+				model.openWorkspacePreview()
 			case "confirm":
 				model.confirmOpen = true
 				model.confirmAction = dashboardSelection{

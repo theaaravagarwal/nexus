@@ -174,6 +174,9 @@ ui:
   theme: nexus
   # opaque paints the theme background; transparent preserves your terminal.
   background: opaque
+  # workbench | console | fleet
+  workspace: workbench
+  pinned_actions: [ssh, info, storage]
 
 reachability:
   # DNS/TCP checks only; no background authentication.
@@ -200,7 +203,8 @@ host_profiles:
     tags: [prod, web]
     os: Ubuntu
     commands:
-      - name: logs
+      - id: logs
+        name: logs
         description: Follow application logs
         command: journalctl -u app -f
         interactive: true
@@ -217,8 +221,9 @@ How to use the config:
 
 For themes, press `a`, choose **Themes**, move with `j/k`, then press
 `enter` to use one for the current session or `s` to save it as the default.
-Actions with the highest local usage count rise to the top of the menu; unused
-actions retain their predictable default order.
+Choose **Workspace** the same way to preview or save Workbench, Console, or
+Fleet. `ui.pinned_actions` accepts stable built-in IDs and `command:<id>`;
+configured pins lead in exact order, followed by frequency-ranked actions.
 Hosts are grouped with reachable machines first, then ordered by frequency and
 recency within each group. Probe completion preserves the selected target and
 active host filter.
@@ -237,6 +242,8 @@ Config keys:
 - `full_index_depth`: max depth used in `--indexing full` mode.
 - `ui.theme`: `nexus`, `nord`, `dracula`, `catppuccin`, `gruvbox`, `mono`, or `terminal`.
 - `ui.background`: `opaque` or `transparent`.
+- `ui.workspace`: `workbench`, `console`, or `fleet`.
+- `ui.pinned_actions`: ordered built-in IDs or `command:<id>` references.
 - `ui.colors`: optional semantic overrides such as `focus` and `live`.
 - `reachability.*`: bounds saved-target DNS/TCP checks; these are not SSH/login latency checks.
 - `fzf.layout`: `default`, `reverse`, or `reverse-list`.

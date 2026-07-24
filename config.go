@@ -13,6 +13,7 @@ import (
 )
 
 type commandConfig struct {
+	ID          string `yaml:"id,omitempty"`
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 	Command     string `yaml:"command"`
@@ -20,9 +21,11 @@ type commandConfig struct {
 }
 
 type uiConfig struct {
-	Theme      string            `yaml:"theme"`
-	Background string            `yaml:"background"`
-	Colors     map[string]string `yaml:"colors,omitempty"`
+	Theme         string            `yaml:"theme"`
+	Background    string            `yaml:"background"`
+	Workspace     string            `yaml:"workspace,omitempty"`
+	PinnedActions []string          `yaml:"pinned_actions,omitempty"`
+	Colors        map[string]string `yaml:"colors,omitempty"`
 }
 
 type reachabilityConfig struct {
@@ -58,8 +61,10 @@ func defaultAppConfig() appConfig {
 	return appConfig{
 		FullIndexDepth: defaultFullIndexDepth,
 		UI: uiConfig{
-			Theme:      "nexus",
-			Background: "opaque",
+			Theme:         "nexus",
+			Background:    "opaque",
+			Workspace:     "workbench",
+			PinnedActions: []string{"ssh", "info", "storage"},
 		},
 		Reachability: reachabilityConfig{
 			Enabled:      &enabled,
@@ -110,6 +115,14 @@ ui:
   theme: nexus
   # opaque paints the theme background; transparent uses your terminal background.
   background: opaque
+  # workbench | console | fleet
+  workspace: workbench
+  # Stable built-in IDs or command:<id>. Pins stay in this exact order.
+  pinned_actions:
+    - ssh
+    - info
+    - storage
+  # To pin a saved command with id: tmux, add: command:tmux
   # Optional semantic overrides accept hex or ANSI color values.
   # colors:
   #   focus: "#A78BFA"
@@ -150,7 +163,8 @@ const savedCommandExamplesYAML = `
 #
 # 1. A read-only command available on every saved computer:
 # commands:
-#   - name: disk usage
+#   - id: disk-usage
+#     name: disk usage
 #     description: Show free space on every mounted filesystem
 #     command: df -h
 #
@@ -193,6 +207,18 @@ func saveThemeToConfig(configPath, name string) error {
 	if _, ok := themes[name]; !ok {
 		return fmt.Errorf("unknown UI theme %q", name)
 	}
+	return saveUIValue(configPath, "theme", name)
+}
+
+func saveWorkspaceToConfig(configPath, name string) error {
+	name = normalizeWorkspaceMode(name)
+	if name == "" {
+		return fmt.Errorf("unknown UI workspace")
+	}
+	return saveUIValue(configPath, "workspace", name)
+}
+
+func saveUIValue(configPath, key, value string) error {
 	if configPath == "" {
 		return errors.New("config path is empty")
 	}
@@ -222,17 +248,17 @@ func saveThemeToConfig(configPath, name string) error {
 	if ui.Kind != yaml.MappingNode {
 		return fmt.Errorf("invalid config YAML %s: ui must be a mapping", configPath)
 	}
-	themeNode := mappingValue(ui, "theme")
-	if themeNode == nil {
+	valueNode := mappingValue(ui, key)
+	if valueNode == nil {
 		ui.Content = append(ui.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "theme"},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
 			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str"},
 		)
-		themeNode = ui.Content[len(ui.Content)-1]
+		valueNode = ui.Content[len(ui.Content)-1]
 	}
-	themeNode.Kind = yaml.ScalarNode
-	themeNode.Tag = "!!str"
-	themeNode.Value = name
+	valueNode.Kind = yaml.ScalarNode
+	valueNode.Tag = "!!str"
+	valueNode.Value = value
 
 	var output bytes.Buffer
 	encoder := yaml.NewEncoder(&output)
@@ -278,6 +304,11 @@ func loadAppConfig(configPath string) (appConfig, error) {
 	if cfg.FZF.Theme == "nexus" {
 		cfg.FZF.Theme = cfg.UI.Theme
 	}
+	cfg.UI.Workspace = normalizeWorkspaceMode(cfg.UI.Workspace)
+	if cfg.UI.Workspace == "" {
+		return appConfig{}, fmt.Errorf("ui.workspace must be workbench, console, or fleet")
+	}
+	cfg.UI.PinnedActions = sanitizePinnedActions(cfg.UI.PinnedActions)
 	switch strings.ToLower(strings.TrimSpace(cfg.UI.Background)) {
 	case "", "opaque":
 		cfg.UI.Background = "opaque"
@@ -356,11 +387,15 @@ func sanitizeCommands(commands []commandConfig) []commandConfig {
 	byName := map[string]commandConfig{}
 	order := make([]string, 0, len(commands))
 	for _, command := range commands {
+		command.ID = sanitizeCommandID(command.ID)
 		command.Name = sanitizeLabel(command.Name)
 		command.Description = sanitizeTerminalText(command.Description)
 		command.Command = sanitizeCommandText(command.Command)
 		if command.Name == "" || command.Command == "" {
 			continue
+		}
+		if command.ID == "" {
+			command.ID = sanitizeCommandID(command.Name)
 		}
 		if _, exists := byName[command.Name]; !exists {
 			order = append(order, command.Name)
@@ -372,6 +407,100 @@ func sanitizeCommands(commands []commandConfig) []commandConfig {
 		out = append(out, byName[name])
 	}
 	return out
+}
+
+func normalizeWorkspaceMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "workbench":
+		return "workbench"
+	case "console":
+		return "console"
+	case "fleet":
+		return "fleet"
+	default:
+		return ""
+	}
+}
+
+func sanitizeCommandID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var out strings.Builder
+	dash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			out.WriteRune(r)
+			dash = false
+		case r == '-', r == ' ', r == '.':
+			if out.Len() > 0 && !dash {
+				out.WriteByte('-')
+				dash = true
+			}
+		}
+	}
+	return strings.Trim(out.String(), "-")
+}
+
+func sanitizePinnedActions(values []string) []string {
+	out := make([]string, 0, min(32, len(values)))
+	seen := make(map[string]struct{})
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(sanitizeTerminalText(value)))
+		if value == "" || len(value) > 128 {
+			continue
+		}
+		if strings.HasPrefix(value, "command:") {
+			id := sanitizeCommandID(strings.TrimPrefix(value, "command:"))
+			if id == "" {
+				continue
+			}
+			value = "command:" + id
+		} else {
+			value = sanitizeCommandID(value)
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+		if len(out) == 32 {
+			break
+		}
+	}
+	return out
+}
+
+func unresolvedPinnedActions(cfg appConfig) []string {
+	known := map[string]struct{}{
+		"ssh": {}, "pull": {}, "push": {}, "top": {}, "net": {}, "info": {},
+		"storage": {}, "copy-key": {}, "config": {}, "fleet": {}, "themes": {},
+		"workspace": {}, "probe": {}, "probe-all": {},
+	}
+	addCommands := func(commands []commandConfig) {
+		for _, command := range commands {
+			id := command.ID
+			if id == "" {
+				id = sanitizeCommandID(command.Name)
+			}
+			if id != "" {
+				known["command:"+id] = struct{}{}
+			}
+		}
+	}
+	addCommands(cfg.Commands)
+	for _, commands := range cfg.TagCommands {
+		addCommands(commands)
+	}
+	for _, profile := range cfg.HostProfiles {
+		addCommands(profile.Commands)
+	}
+	var unresolved []string
+	for _, pin := range cfg.UI.PinnedActions {
+		if _, exists := known[pin]; !exists {
+			unresolved = append(unresolved, pin)
+		}
+	}
+	return unresolved
 }
 
 func commandsForTarget(target string) []commandConfig {

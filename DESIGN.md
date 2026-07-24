@@ -42,6 +42,13 @@ The default `nexus` theme is anchored by:
 - Wide: two-region host list and selected-host summary organized as identity,
   system, storage, and tools/commands. Fleet, themes, saved
   commands, and deeper actions appear only when requested.
+- Ultra-wide: an adaptive upper workspace reveals more real inventory when it
+  exists, while a full-width lower deck uses the remaining room for selected-host
+  pulse, bounded output, and five session events. Workbench is the default;
+  Console and Fleet reuse the same hierarchy for output-heavy and cross-host work.
+- Short and tiny terminals progressively collapse to a host-first list and then
+  a single selected-target line. Rich panes require both width and usable body
+  height, so resizing never clips the connect path or its essential keys.
 - The workspace uses six canonical keys: `j/k` move, `Enter` connects, `/`
   finds, `a` opens every action, `h` explains every key, and `q` quits.
   Lists reuse `j/k`, `Enter`, and `Esc`; specialized keys appear only in the
@@ -59,6 +66,12 @@ The default `nexus` theme is anchored by:
 - Saved commands display bounded, sanitized stdout/stderr in a scrollable TUI
   result view. Only commands explicitly marked `interactive` temporarily own
   the terminal.
+- Activity holds five bounded events in memory and previews current output.
+  State persists one task summary—never remote output or an accumulating
+  history—and ignores stale async completions after a newer action begins.
+- Selected-host telemetry is lightweight and session-only. It permits one
+  noninteractive SSH request at a time, pauses when inappropriate, and backs off
+  quietly on failure without changing frecency, action use, or persisted state.
 - Static storage inventories stay in the same result view. Cached detail uses
   decimal GB/TB and a bounded mounted-filesystem summary; the Storage action
   exposes the complete inventory.
@@ -78,4 +91,7 @@ state without moving the user's current selection.
 Built-in themes share identical semantic roles and component behavior. Open
 Actions with `a`, choose Themes, then use `Enter` for the session or `s`
 to save the YAML default. Advanced users can still override semantic colors in
-YAML. Theme choice applies consistently to the TUI, help, and FZF.
+YAML. Theme choice applies consistently to the TUI, help, and FZF. Every opaque
+semantic span paints its surface; transparent mode emits no forced background.
+Workspace mode and ordered built-in or `command:<id>` pins use the same
+session/default model without introducing another global shortcut.

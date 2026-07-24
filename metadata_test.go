@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -94,6 +95,52 @@ func TestParseMetadataDeduplicatesAndCapsRepeatedRecords(t *testing.T) {
 	}
 	if strings.Join(got.Tools, ",") != "df,duf" {
 		t.Fatalf("tools=%v", got.Tools)
+	}
+}
+
+func TestGPURecordsMergeBackendsWithoutLosingIdenticalCards(t *testing.T) {
+	got := parseMetadata(strings.Join([]string{
+		"GPU_RECORD=nvidia\t0000:01:00.0\tNVIDIA GeForce RTX 3060 · 12.9 GB VRAM",
+		"GPU_RECORD=nvidia\t0000:02:00.0\tNVIDIA GeForce RTX 3060 · 12.9 GB VRAM",
+		"GPU_RECORD=wsl-host\tPCI\\VEN_10DE&DEV_2504\tNVIDIA GeForce RTX 3060",
+		"GPU_RECORD=wsl-host\tPCI\\VEN_10DE&DEV_2504&SECOND\tNVIDIA GeForce RTX 3060",
+		"GPU_RECORD=wsl-host\tPCI\\VEN_8086&DEV_A780\tIntel(R) UHD Graphics 770",
+	}, "\n"))
+	want := []string{
+		"NVIDIA GeForce RTX 3060 · 12.9 GB VRAM",
+		"NVIDIA GeForce RTX 3060 · 12.9 GB VRAM",
+		"Intel(R) UHD Graphics 770",
+	}
+	if !slices.Equal(got.GPUs, want) {
+		t.Fatalf("GPUs=%v, want %v", got.GPUs, want)
+	}
+}
+
+func TestGPURecordBackendFailureOutputDoesNotSuppressOtherSources(t *testing.T) {
+	got := parseMetadata(strings.Join([]string{
+		"nvidia-smi: driver communication failed",
+		"GPU_RECORD=lspci\t0000:04:00.0\tAMD Radeon RX 7900 XTX",
+		"GPU_RECORD=system_profiler\t1\tApple M4 Max",
+	}, "\n"))
+	if !slices.Equal(got.GPUs, []string{"AMD Radeon RX 7900 XTX", "Apple M4 Max"}) {
+		t.Fatalf("GPUs=%v", got.GPUs)
+	}
+}
+
+func TestMetadataScriptIncludesAdditiveWSLAndNativeGPUBackends(t *testing.T) {
+	for _, want := range []string{
+		"/usr/lib/wsl/lib/nvidia-smi",
+		"Get-CimInstance Win32_VideoController",
+		"system_profiler SPDisplaysDataType",
+		"lspci -D",
+		"/sys/class/drm/card[0-9]*",
+	} {
+		if !strings.Contains(metadataScript, want) {
+			t.Fatalf("metadata script missing %q", want)
+		}
+	}
+	if strings.Contains(metadataScript, `[ -z "$gpu_records" ] && command -v lspci`) {
+		t.Fatal("GPU discovery regressed to a mutually exclusive fallback chain")
 	}
 }
 

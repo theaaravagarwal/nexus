@@ -31,20 +31,21 @@ FORM: Daily-driver terminal workspace with information density under control.
 type dashboardAction string
 
 const (
-	actionSSH      dashboardAction = "ssh"
-	actionPull     dashboardAction = "pull"
-	actionPush     dashboardAction = "push"
-	actionTop      dashboardAction = "top"
-	actionNet      dashboardAction = "net"
-	actionInfo     dashboardAction = "info"
-	actionStorage  dashboardAction = "storage"
-	actionCopyKey  dashboardAction = "copy-key"
-	actionCustom   dashboardAction = "custom"
-	actionConfig   dashboardAction = "config"
-	actionFleet    dashboardAction = "fleet"
-	actionThemes   dashboardAction = "themes"
-	actionProbe    dashboardAction = "probe"
-	actionProbeAll dashboardAction = "probe-all"
+	actionSSH       dashboardAction = "ssh"
+	actionPull      dashboardAction = "pull"
+	actionPush      dashboardAction = "push"
+	actionTop       dashboardAction = "top"
+	actionNet       dashboardAction = "net"
+	actionInfo      dashboardAction = "info"
+	actionStorage   dashboardAction = "storage"
+	actionCopyKey   dashboardAction = "copy-key"
+	actionCustom    dashboardAction = "custom"
+	actionConfig    dashboardAction = "config"
+	actionFleet     dashboardAction = "fleet"
+	actionThemes    dashboardAction = "themes"
+	actionWorkspace dashboardAction = "workspace"
+	actionProbe     dashboardAction = "probe"
+	actionProbeAll  dashboardAction = "probe-all"
 )
 
 type dashboardSelection struct {
@@ -82,9 +83,10 @@ type probeTickMsg struct{}
 type probeTargetMsg reachabilityResult
 
 type metadataRefreshMsg struct {
-	Target   string
-	Activity hostActivity
-	Err      error
+	Target      string
+	OperationID uint64
+	Activity    hostActivity
+	Err         error
 }
 
 type transferScanMsg struct {
@@ -99,12 +101,37 @@ type themeSaveMsg struct {
 }
 
 type configuredCommandMsg struct {
-	Output string
-	Err    error
+	OperationID uint64
+	Output      string
+	Err         error
 }
 
 type actionUsageMsg struct {
 	Err error
+}
+
+type operationPersistMsg struct {
+	Err error
+}
+
+type workspaceSaveMsg struct {
+	Name string
+	Err  error
+}
+
+type dashboardOperation struct {
+	operationSummary
+	Output string
+}
+
+type activityEvent struct {
+	Label      string
+	Host       string
+	Status     string
+	Summary    string
+	Output     string
+	FinishedAt time.Time
+	Duration   time.Duration
 }
 
 type configuredCommandResult struct {
@@ -137,48 +164,63 @@ type transferFlow struct {
 }
 
 type dashboardModel struct {
-	hosts            []dashboardHost
-	filtered         []int
-	cursor           int
-	query            string
-	filtering        bool
-	width            int
-	height           int
-	choice           dashboardSelection
-	done             bool
-	commandOpen      bool
-	commandFiltering bool
-	commandCursor    int
-	commandQuery     string
-	confirmOpen      bool
-	confirmAction    dashboardSelection
-	commandResult    *configuredCommandResult
-	commandRunning   bool
-	commandOffset    int
-	actionUses       map[string]int
-	transfer         *transferFlow
-	helpOpen         bool
-	themeOpen        bool
-	themeCursor      int
-	themeOriginal    theme
-	themePreview     bool
-	themeSaving      bool
-	showTopology     bool
-	probing          bool
-	probeQueue       []string
-	probeInitial     []string
-	probeTargets     map[string]bool
-	probeTotal       int
-	probeComplete    int
-	metadataBusy     map[string]bool
-	statePath        string
-	configPath       string
-	indexMode        string
-	notice           string
-	noticeError      bool
-	plain            bool
-	theme            theme
-	now              time.Time
+	hosts              []dashboardHost
+	filtered           []int
+	cursor             int
+	query              string
+	filtering          bool
+	width              int
+	height             int
+	choice             dashboardSelection
+	done               bool
+	commandOpen        bool
+	commandFiltering   bool
+	commandCursor      int
+	commandQuery       string
+	confirmOpen        bool
+	confirmAction      dashboardSelection
+	commandResult      *configuredCommandResult
+	commandRunning     bool
+	commandOffset      int
+	actionUses         map[string]int
+	transfer           *transferFlow
+	helpOpen           bool
+	themeOpen          bool
+	themeCursor        int
+	themeOriginal      theme
+	themePreview       bool
+	themeSaving        bool
+	workspaceOpen      bool
+	workspaceCursor    int
+	workspaceOriginal  string
+	workspaceSaving    bool
+	workspace          string
+	showTopology       bool
+	probing            bool
+	probeQueue         []string
+	probeInitial       []string
+	probeTargets       map[string]bool
+	probeTotal         int
+	probeComplete      int
+	metadataBusy       map[string]bool
+	statePath          string
+	configPath         string
+	indexMode          string
+	notice             string
+	noticeError        bool
+	plain              bool
+	theme              theme
+	now                time.Time
+	operation          *dashboardOperation
+	operationPersisted bool
+	operationID        uint64
+	operationProbeID   uint64
+	telemetry          map[string]hostTelemetry
+	telemetryTarget    string
+	telemetryGen       uint64
+	telemetryFlight    uint64
+	telemetryFocused   bool
+	activities         []activityEvent
 }
 
 func newDashboardModel(hosts []string) dashboardModel {
@@ -188,19 +230,28 @@ func newDashboardModel(hosts []string) dashboardModel {
 func newDashboardModelWithState(hosts []string, state nexusState, now time.Time) dashboardModel {
 	safe := dedupeKeepOrder(hosts)
 	model := dashboardModel{
-		width:        100,
-		height:       30,
-		showTopology: false,
-		probeTargets: make(map[string]bool),
-		metadataBusy: make(map[string]bool),
-		actionUses:   make(map[string]int, len(state.Actions)),
-		indexMode:    "lazy",
-		plain:        noColorRequested(),
-		theme:        activeTheme(),
-		now:          now,
+		width:            100,
+		height:           30,
+		showTopology:     false,
+		probeTargets:     make(map[string]bool),
+		metadataBusy:     make(map[string]bool),
+		actionUses:       make(map[string]int, len(state.Actions)),
+		indexMode:        "lazy",
+		plain:            noColorRequested(),
+		theme:            activeTheme(),
+		workspace:        normalizeWorkspaceMode(loadedConfig.UI.Workspace),
+		now:              now,
+		telemetry:        make(map[string]hostTelemetry),
+		telemetryGen:     1,
+		telemetryFocused: true,
 	}
 	for action, count := range state.Actions {
 		model.actionUses[action] = count
+	}
+	if state.LatestOperation != nil {
+		snapshot := *state.LatestOperation
+		model.operation = &dashboardOperation{operationSummary: snapshot}
+		model.operationPersisted = true
 	}
 	for _, target := range safe {
 		profile := profileForTarget(target)
@@ -230,6 +281,7 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 		})
 	}
 	model.applyFilter()
+	model.telemetryTarget = model.selectedTarget()
 	if len(model.hosts) > 0 && loadedConfig.Reachability.Enabled != nil && *loadedConfig.Reachability.Enabled {
 		model, _ = model.beginProbe(model.allTargets())
 	}
@@ -242,10 +294,11 @@ func noColorRequested() bool {
 }
 
 func (m dashboardModel) Init() tea.Cmd {
-	if len(m.probeInitial) == 0 {
-		return nil
+	commands := []tea.Cmd{telemetryTick(time.Second, m.telemetryGen)}
+	if len(m.probeInitial) > 0 {
+		commands = append(commands, m.probeCommands(m.probeInitial))
 	}
-	return m.probeCommands(m.probeInitial)
+	return tea.Batch(commands...)
 }
 
 func (m dashboardModel) allTargets() []string {
@@ -288,18 +341,18 @@ func (m dashboardModel) probeCommands(targets []string) tea.Cmd {
 	return tea.Batch(commands...)
 }
 
-func (m dashboardModel) metadataCommand(target string) tea.Cmd {
+func (m dashboardModel) metadataCommand(target string, operationID uint64) tea.Cmd {
 	statePath := m.statePath
 	return func() tea.Msg {
 		if statePath == "" {
-			return metadataRefreshMsg{Target: target, Err: errors.New("metadata cache is unavailable")}
+			return metadataRefreshMsg{Target: target, OperationID: operationID, Err: errors.New("metadata cache is unavailable")}
 		}
 		err := refreshHostMetadata(statePath, target)
 		if err != nil {
-			return metadataRefreshMsg{Target: target, Err: err}
+			return metadataRefreshMsg{Target: target, OperationID: operationID, Err: err}
 		}
 		state, err := loadState(statePath)
-		return metadataRefreshMsg{Target: target, Activity: state.Hosts[target], Err: err}
+		return metadataRefreshMsg{Target: target, OperationID: operationID, Activity: state.Hosts[target], Err: err}
 	}
 }
 
@@ -311,7 +364,45 @@ func (m dashboardModel) startMetadataRefresh() (tea.Model, tea.Cmd) {
 	m.metadataBusy[target] = true
 	m.notice = "Refreshing system snapshot for " + displayName(m.selectedHost())
 	m.noticeError = false
-	return m, m.metadataCommand(target)
+	m.startOperation(actionInfo, "Refresh info", target)
+	return m, m.metadataCommand(target, m.operationID)
+}
+
+func (m *dashboardModel) startOperation(action dashboardAction, label, host string) {
+	m.operationID++
+	m.operationPersisted = false
+	m.operation = &dashboardOperation{operationSummary: operationSummary{
+		Action:    string(action),
+		Label:     label,
+		Host:      host,
+		Status:    "running",
+		StartedAt: time.Now(),
+	}}
+}
+
+func (m *dashboardModel) finishOperation(status, summary, output string) tea.Cmd {
+	if m.operation == nil {
+		return nil
+	}
+	now := time.Now()
+	m.operation.Status = status
+	m.operation.Summary = sanitizeTerminalText(summary)
+	m.operation.FinishedAt = now
+	m.operation.Duration = now.Sub(m.operation.StartedAt)
+	m.operation.Output = sanitizeCommandOutput(output)
+	m.activities = appendActivity(m.activities, activityEvent{
+		Label: m.operation.Label, Host: m.operation.Host, Status: status,
+		Summary: m.operation.Summary, Output: m.operation.Output,
+		FinishedAt: now, Duration: m.operation.Duration,
+	})
+	if m.statePath == "" {
+		return nil
+	}
+	snapshot := m.operation.operationSummary
+	path := m.statePath
+	return func() tea.Msg {
+		return operationPersistMsg{Err: recordLatestOperation(path, snapshot)}
+	}
 }
 
 func (m dashboardModel) startTransfer(action dashboardAction) (tea.Model, tea.Cmd) {
@@ -427,6 +518,12 @@ func (m dashboardModel) updateTransfer(key string) (tea.Model, tea.Cmd) {
 
 func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
+	case tea.FocusMsg:
+		m.telemetryFocused = true
+		return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+	case tea.BlurMsg:
+		m.telemetryFocused = false
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = max(1, msg.Width)
 		m.height = max(1, msg.Height)
@@ -450,8 +547,30 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.probing = false
 			m.probeInitial = nil
 			m.sortHostsByAvailabilityKeeping(m.selectedTarget())
+			var operationCmd tea.Cmd
+			if m.operationProbeID != 0 && m.operationProbeID == m.operationID {
+				online := 0
+				for _, host := range m.hosts {
+					if m.operation != nil && m.operation.Action == string(actionProbe) && host.Target != m.operation.Host {
+						continue
+					}
+					if host.Reachability.Status == reachOnline {
+						online++
+					}
+				}
+				operationCmd = m.finishOperation(
+					"success",
+					fmt.Sprintf("%d of %d online", online, m.probeTotal),
+					"",
+				)
+			}
+			m.operationProbeID = 0
 			delay := time.Duration(loadedConfig.Reachability.CacheSeconds) * time.Second
-			return m, tea.Tick(delay, func(time.Time) tea.Msg { return probeTickMsg{} })
+			return m, tea.Batch(
+				operationCmd,
+				tea.Tick(delay, func(time.Time) tea.Msg { return probeTickMsg{} }),
+				telemetryTick(100*time.Millisecond, m.telemetryGen),
+			)
 		}
 		return m, nil
 	case probeTickMsg:
@@ -465,6 +584,9 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.notice = "Snapshot failed for " + m.displayNameForTarget(msg.Target) + ": " + sanitizeTerminalText(msg.Err.Error())
 			m.noticeError = true
+			if msg.OperationID == m.operationID {
+				return m, m.finishOperation("error", "Snapshot failed", msg.Err.Error())
+			}
 			return m, nil
 		}
 		for i := range m.hosts {
@@ -490,6 +612,9 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.markHostUsed(msg.Target, usedAt)
+		if msg.OperationID == m.operationID {
+			return m, m.finishOperation("success", "System details updated", "")
+		}
 		return m, nil
 	case themeSaveMsg:
 		m.themeSaving = false
@@ -506,6 +631,20 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = "Theme saved as default: " + msg.Name
 		m.noticeError = false
 		return m, nil
+	case workspaceSaveMsg:
+		m.workspaceSaving = false
+		if msg.Err != nil {
+			m.notice = "Workspace save failed: " + sanitizeTerminalText(msg.Err.Error())
+			m.noticeError = true
+			return m, nil
+		}
+		loadedConfig.UI.Workspace = msg.Name
+		m.workspace = msg.Name
+		m.workspaceOriginal = msg.Name
+		m.workspaceOpen = false
+		m.notice = "Workspace saved as default: " + msg.Name
+		m.noticeError = false
+		return m, nil
 	case configuredCommandMsg:
 		m.commandRunning = false
 		if m.commandResult == nil {
@@ -514,6 +653,10 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandResult.Output = msg.Output
 		if msg.Err != nil {
 			m.commandResult.Err = sanitizeTerminalText(msg.Err.Error())
+			if msg.OperationID == m.operationID {
+				return m, m.finishOperation("error", "Command failed", msg.Output+"\n"+msg.Err.Error())
+			}
+			return m, nil
 		} else {
 			usedAt := time.Now()
 			if m.statePath != "" {
@@ -523,7 +666,64 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.markHostUsed(m.commandResult.Host, usedAt)
 		}
+		if msg.OperationID == m.operationID {
+			return m, m.finishOperation("success", "Command finished", msg.Output)
+		}
 		return m, nil
+	case operationPersistMsg:
+		if msg.Err != nil {
+			logVerbose("failed to record latest operation: %v", msg.Err)
+		}
+		return m, nil
+	case telemetryTickMsg:
+		if msg.Generation != m.telemetryGen {
+			return m, nil
+		}
+		target := m.selectedTarget()
+		if target != m.telemetryTarget {
+			m.telemetryTarget = target
+			m.telemetryGen++
+			return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+		}
+		if target == "" || !m.telemetryFocused || m.telemetryPaused() {
+			return m, telemetryTick(telemetryInterval, m.telemetryGen)
+		}
+		if m.telemetryFlight != 0 {
+			return m, telemetryTick(time.Second, m.telemetryGen)
+		}
+		host := m.selectedHost()
+		if host.Reachability.Status != reachOnline {
+			return m, telemetryTick(telemetryInterval, m.telemetryGen)
+		}
+		entry := m.telemetry[target]
+		if wait := time.Until(entry.NextAttempt); wait > 0 {
+			return m, telemetryTick(min(wait, telemetryMaxBackoff), m.telemetryGen)
+		}
+		m.telemetryFlight = m.telemetryGen
+		return m, telemetryCommand(target, m.telemetryGen)
+	case telemetryResultMsg:
+		if msg.Generation == m.telemetryFlight {
+			m.telemetryFlight = 0
+		}
+		if msg.Generation != m.telemetryGen || msg.Target != m.selectedTarget() {
+			return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+		}
+		entry := m.telemetry[msg.Target]
+		if msg.Err != nil {
+			entry.Failures++
+			entry.LastErr = sanitizeTerminalText(msg.Err.Error())
+			delay := telemetryBackoff(entry.Failures, m.telemetryGen)
+			entry.NextAttempt = time.Now().Add(delay)
+			m.telemetry[msg.Target] = entry
+			return m, telemetryTick(delay, m.telemetryGen)
+		}
+		entry.Failures = 0
+		entry.LastErr = ""
+		entry.NextAttempt = time.Time{}
+		entry.History = appendTelemetry(entry.History, msg.Sample)
+		entry.Current = entry.History[len(entry.History)-1]
+		m.telemetry[msg.Target] = entry
+		return m, telemetryTick(telemetryInterval, m.telemetryGen)
 	case actionUsageMsg:
 		if msg.Err != nil {
 			logVerbose("failed to record action usage: %v", msg.Err)
@@ -587,10 +787,11 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandOffset = 0
 				m.commandResult.Output = ""
 				m.commandResult.Err = ""
+				m.startOperation(m.commandResult.Action, m.commandResult.Command.Name, m.commandResult.Host)
 				if m.commandResult.Action == actionStorage {
-					return m, m.storageCommandCmd(m.commandResult.Host)
+					return m, m.storageCommandCmd(m.commandResult.Host, m.operationID)
 				}
-				return m, m.configuredCommandCmd(m.commandResult.Host, m.commandResult.Command.Command)
+				return m, m.configuredCommandCmd(m.commandResult.Host, m.commandResult.Command.Command, m.operationID)
 			}
 		}
 		return m, nil
@@ -619,9 +820,10 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandRunning = true
 				m.commandOffset = 0
 				m.commandResult = &configuredCommandResult{
-					Host: selection.Host, Command: selection.Command,
+					Action: actionCustom, Host: selection.Host, Command: selection.Command,
 				}
-				return m, tea.Batch(usageCmd, m.configuredCommandCmd(selection.Host, selection.Command.Command))
+				m.startOperation(actionCustom, selection.Command.Name, selection.Host)
+				return m, tea.Batch(usageCmd, m.configuredCommandCmd(selection.Host, selection.Command.Command, m.operationID))
 			}
 			m.choice = m.confirmAction
 			m.done = true
@@ -661,6 +863,31 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.themeSaving = true
 				name := names[m.themeCursor]
 				return m, m.saveThemeCommand(name)
+			}
+		}
+		return m, nil
+	}
+	if m.workspaceOpen {
+		names := workspaceModes()
+		switch key {
+		case "esc":
+			m.workspace = m.workspaceOriginal
+			m.workspaceOpen = false
+		case "k":
+			m.workspaceCursor = (m.workspaceCursor + len(names) - 1) % len(names)
+			m.workspace = names[m.workspaceCursor]
+		case "j":
+			m.workspaceCursor = (m.workspaceCursor + 1) % len(names)
+			m.workspace = names[m.workspaceCursor]
+		case "enter":
+			m.workspaceOpen = false
+			m.notice = "Using workspace for this session: " + m.workspace
+			m.noticeError = false
+		case "s":
+			if !m.workspaceSaving {
+				m.workspaceSaving = true
+				name := names[m.workspaceCursor]
+				return m, m.saveWorkspaceCommand(name)
 			}
 		}
 		return m, nil
@@ -730,6 +957,8 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandQuery = ""
 				target := m.selectedTarget()
 				if target != "" && !m.probing {
+					m.startOperation(actionProbe, "Check host", target)
+					m.operationProbeID = m.operationID
 					m, command := m.beginProbe([]string{target})
 					return m, tea.Batch(usageCmd, command)
 				}
@@ -739,6 +968,8 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandFiltering = false
 				m.commandQuery = ""
 				if !m.probing {
+					m.startOperation(actionProbeAll, "Check all hosts", "")
+					m.operationProbeID = m.operationID
 					m, command := m.beginProbe(m.allTargets())
 					return m, tea.Batch(usageCmd, command)
 				}
@@ -752,6 +983,11 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandOpen = false
 				m.commandFiltering = false
 				m.openThemePreview()
+				return m, usageCmd
+			case actionWorkspace:
+				m.commandOpen = false
+				m.commandFiltering = false
+				m.openWorkspacePreview()
 				return m, usageCmd
 			case actionConfig:
 				updated, commandCmd := m.choose(actionConfig)
@@ -769,7 +1005,8 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						Name: "Storage", Description: "All mounted filesystems",
 					},
 				}
-				return m, tea.Batch(usageCmd, m.storageCommandCmd(m.selectedTarget()))
+				m.startOperation(actionStorage, "Storage", m.selectedTarget())
+				return m, tea.Batch(usageCmd, m.storageCommandCmd(m.selectedTarget(), m.operationID))
 			case actionCopyKey:
 				m.commandOpen = false
 				m.commandFiltering = false
@@ -849,13 +1086,33 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.commandCursor = 0
 		m.commandQuery = ""
 	case "k":
+		before := m.selectedTarget()
 		m.moveCursor(-1)
+		if before != m.selectedTarget() {
+			m.resetTelemetryTarget()
+			return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+		}
 	case "j":
+		before := m.selectedTarget()
 		m.moveCursor(1)
+		if before != m.selectedTarget() {
+			m.resetTelemetryTarget()
+			return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+		}
 	case "enter":
 		return m.choose(actionSSH)
 	}
 	return m, nil
+}
+
+func (m dashboardModel) telemetryPaused() bool {
+	return m.helpOpen || m.commandOpen || m.themeOpen || m.workspaceOpen || m.confirmOpen ||
+		m.transfer != nil || m.commandResult != nil || m.showTopology
+}
+
+func (m *dashboardModel) resetTelemetryTarget() {
+	m.telemetryTarget = m.selectedTarget()
+	m.telemetryGen++
 }
 
 func (m *dashboardModel) openThemePreview() {
@@ -871,6 +1128,23 @@ func (m *dashboardModel) openThemePreview() {
 	m.themeOpen = true
 }
 
+func workspaceModes() []string {
+	return []string{"workbench", "console", "fleet"}
+}
+
+func (m *dashboardModel) openWorkspacePreview() {
+	names := workspaceModes()
+	m.workspaceOriginal = m.workspace
+	m.workspaceCursor = 0
+	for index, name := range names {
+		if name == m.workspace {
+			m.workspaceCursor = index
+			break
+		}
+	}
+	m.workspaceOpen = true
+}
+
 func (m dashboardModel) saveThemeCommand(name string) tea.Cmd {
 	configPath := m.configPath
 	return func() tea.Msg {
@@ -878,19 +1152,26 @@ func (m dashboardModel) saveThemeCommand(name string) tea.Cmd {
 	}
 }
 
-func (m dashboardModel) configuredCommandCmd(host, command string) tea.Cmd {
+func (m dashboardModel) saveWorkspaceCommand(name string) tea.Cmd {
+	configPath := m.configPath
+	return func() tea.Msg {
+		return workspaceSaveMsg{Name: name, Err: saveWorkspaceToConfig(configPath, name)}
+	}
+}
+
+func (m dashboardModel) configuredCommandCmd(host, command string, operationID uint64) tea.Cmd {
 	return func() tea.Msg {
 		output, err := runConfiguredRemoteCommandCaptured(host, command)
-		return configuredCommandMsg{Output: output, Err: err}
+		return configuredCommandMsg{OperationID: operationID, Output: output, Err: err}
 	}
 }
 
 const storageInventoryScript = `LC_ALL=C df -Pk 2>/dev/null | awk 'NR > 1 && NF >= 6 && $2 ~ /^[0-9]+$/ && $2 > 0 { mount=$6; for (field=7; field<=NF; field++) mount=mount " " $field; printf "DISK=%s\t%s\t%.0f\t%.0f\t%.0f\n", $1, mount, $3 * 1024, $4 * 1024, $2 * 1024 }'`
 
-func (m dashboardModel) storageCommandCmd(host string) tea.Cmd {
+func (m dashboardModel) storageCommandCmd(host string, operationID uint64) tea.Cmd {
 	return func() tea.Msg {
 		output, err := captureRemoteStorage(host)
-		return configuredCommandMsg{Output: output, Err: err}
+		return configuredCommandMsg{OperationID: operationID, Output: output, Err: err}
 	}
 }
 
@@ -1067,6 +1348,7 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 	if m.selectedTarget() == "" {
 		commands := []dashboardCommand{
 			{Label: "Themes", Description: "Preview or save a theme", Action: actionThemes},
+			{Label: "Workspace", Description: "Choose the dashboard layout", Action: actionWorkspace},
 			{Label: "Config", Description: "Commands, profiles, and themes", Action: actionConfig},
 		}
 		m.sortCommandsByUsage(commands)
@@ -1085,6 +1367,7 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 		{"Storage", "Inspect disk usage", actionStorage, commandConfig{}},
 		{"Fleet", "Inspect saved hosts", actionFleet, commandConfig{}},
 		{"Themes", "Preview or save a theme", actionThemes, commandConfig{}},
+		{"Workspace", "Choose the dashboard layout", actionWorkspace, commandConfig{}},
 	}
 	for _, command := range commandsForTarget(m.selectedTarget()) {
 		commands = append(commands, dashboardCommand{
@@ -1097,11 +1380,34 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 }
 
 func (m dashboardModel) sortCommandsByUsage(commands []dashboardCommand) {
+	pinOrder := make(map[string]int, len(loadedConfig.UI.PinnedActions))
+	for index, pin := range loadedConfig.UI.PinnedActions {
+		pinOrder[pin] = index
+	}
 	sort.SliceStable(commands, func(left, right int) bool {
+		leftPin, leftPinned := pinOrder[dashboardCommandPinKey(commands[left])]
+		rightPin, rightPinned := pinOrder[dashboardCommandPinKey(commands[right])]
+		if leftPinned != rightPinned {
+			return leftPinned
+		}
+		if leftPinned && leftPin != rightPin {
+			return leftPin < rightPin
+		}
 		leftUses := m.actionUses[dashboardActionUsageKey(commands[left].Action, commands[left].Command)]
 		rightUses := m.actionUses[dashboardActionUsageKey(commands[right].Action, commands[right].Command)]
 		return leftUses > rightUses
 	})
+}
+
+func dashboardCommandPinKey(command dashboardCommand) string {
+	if command.Action == actionCustom {
+		id := command.Command.ID
+		if id == "" {
+			id = sanitizeCommandID(command.Command.Name)
+		}
+		return "command:" + id
+	}
+	return string(command.Action)
 }
 
 func (m dashboardModel) filteredCommands() []dashboardCommand {
@@ -1122,31 +1428,34 @@ func (m dashboardModel) filteredCommands() []dashboardCommand {
 
 func (m dashboardModel) View() string {
 	if m.width < 30 || m.height < 10 {
-		return m.tinyView()
+		return m.finishView(m.tinyView())
 	}
 	if m.height < 16 {
-		return m.shortView()
+		return m.finishView(m.shortView())
 	}
 	if m.helpOpen {
-		return fitTerminalView(m.helpView(), m.width, m.height)
+		return m.finishView(m.helpView())
 	}
 	if m.commandResult != nil {
-		return fitTerminalView(m.commandResultView(), m.width, m.height)
+		return m.finishView(m.commandResultView())
 	}
 	if m.transfer != nil {
-		return fitTerminalView(m.transferView(), m.width, m.height)
+		return m.finishView(m.transferView())
 	}
 	if m.confirmOpen {
-		return fitTerminalView(m.confirmCommandView(), m.width, m.height)
+		return m.finishView(m.confirmCommandView())
 	}
 	if m.showTopology {
-		return fitTerminalView(m.fleetView(), m.width, m.height)
+		return m.finishView(m.fleetView())
 	}
 	if m.commandOpen {
-		return fitTerminalView(m.commandPaletteView(), m.width, m.height)
+		return m.finishView(m.commandPaletteView())
 	}
 	if m.themeOpen {
-		return fitTerminalView(m.themePreviewView(), m.width, m.height)
+		return m.finishView(m.themePreviewView())
+	}
+	if m.workspaceOpen {
+		return m.finishView(m.workspacePreviewView())
 	}
 	s := m.styles()
 	header := m.headerView(s)
@@ -1155,6 +1464,8 @@ func (m dashboardModel) View() string {
 
 	var body string
 	switch {
+	case m.width >= 150 && bodyHeight >= 24:
+		body = m.ultraWideView(s, m.width, bodyHeight)
 	case m.width >= 96:
 		hostWidth := min(48, max(38, m.width*38/100))
 		body = lipgloss.JoinHorizontal(lipgloss.Top,
@@ -1172,11 +1483,13 @@ func (m dashboardModel) View() string {
 		body = m.compactView(s, m.width, bodyHeight)
 	}
 	body = fitTerminalView(body, m.width, bodyHeight)
-	rendered := fitTerminalView(
+	return m.finishView(
 		lipgloss.JoinVertical(lipgloss.Left, header, body, footer),
-		m.width,
-		m.height,
 	)
+}
+
+func (m dashboardModel) finishView(view string) string {
+	rendered := fitTerminalView(view, m.width, m.height)
 	if !m.plain && m.theme.Background != "" {
 		rendered = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(m.theme.Text)).
@@ -1186,6 +1499,380 @@ func (m dashboardModel) View() string {
 			Render(rendered)
 	}
 	return rendered
+}
+
+func (m dashboardModel) ultraWideView(s dashboardStyles, width, height int) string {
+	switch normalizeWorkspaceMode(m.workspace) {
+	case "console":
+		return m.consoleWorkspaceView(s, width, height)
+	case "fleet":
+		return m.fleetWorkspaceView(s, width, height)
+	default:
+		return m.workbenchWorkspaceView(s, width, height)
+	}
+}
+
+func (m dashboardModel) workspaceColumns(s dashboardStyles, width, height int) string {
+	contentWidth := width
+	hostWidth := min(42, max(38, contentWidth*24/100))
+	actionWidth := min(38, max(32, contentWidth*20/100))
+	detailWidth := max(56, contentWidth-hostWidth-actionWidth)
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		fitTerminalView(m.hostListView(s, hostWidth, height), hostWidth, height),
+		fitTerminalView(m.detailView(s, detailWidth, height), detailWidth, height),
+		fitTerminalView(m.actionRailView(s, actionWidth, height), actionWidth, height),
+	)
+}
+
+func (m dashboardModel) workbenchWorkspaceView(s dashboardStyles, width, height int) string {
+	topHeight := min(44, max(22, height*3/5))
+	topHeight = min(topHeight, max(18, height-12))
+	if host := m.selectedHost(); len(host.Disks) > 6 {
+		topHeight = min(max(18, height-12), max(topHeight, 24+min(12, len(host.Disks)-6)))
+	}
+	deckHeight := max(10, height-topHeight)
+	pulseWidth := max(64, width*3/5)
+	activityWidth := width - pulseWidth
+	top := m.workspaceColumns(s, width, topHeight)
+	deckBody := lipgloss.JoinHorizontal(lipgloss.Top,
+		fitTerminalView(m.telemetryView(s, pulseWidth, deckHeight), pulseWidth, deckHeight),
+		fitTerminalView(m.activityView(s, activityWidth, deckHeight), activityWidth, deckHeight),
+	)
+	deck := m.frameDeck(deckBody, width, deckHeight)
+	content := lipgloss.JoinVertical(lipgloss.Left, top, deck)
+	return lipgloss.NewStyle().Width(width).Height(height).Render(content)
+}
+
+func (m dashboardModel) consoleWorkspaceView(s dashboardStyles, width, height int) string {
+	topHeight := min(24, max(18, height/3))
+	deckHeight := max(10, height-topHeight)
+	outputWidth := max(72, width*2/3)
+	top := m.workspaceColumns(s, width, topHeight)
+	deckBody := lipgloss.JoinHorizontal(lipgloss.Top,
+		fitTerminalView(m.consoleOutputView(s, outputWidth, deckHeight), outputWidth, deckHeight),
+		fitTerminalView(m.activityView(s, width-outputWidth, deckHeight), width-outputWidth, deckHeight),
+	)
+	deck := m.frameDeck(deckBody, width, deckHeight)
+	return lipgloss.NewStyle().Width(width).Height(height).
+		Render(lipgloss.JoinVertical(lipgloss.Left, top, deck))
+}
+
+func (m dashboardModel) fleetWorkspaceView(s dashboardStyles, width, height int) string {
+	topHeight := min(22, max(18, height/3))
+	top := m.workspaceColumns(s, width, topHeight)
+	fleetHeight := max(10, height-topHeight)
+	fleet := m.frameDeck(m.fleetDeckView(s, width, fleetHeight), width, fleetHeight)
+	return lipgloss.NewStyle().Width(width).Height(height).
+		Render(lipgloss.JoinVertical(lipgloss.Left, top, fleet))
+}
+
+func (m dashboardModel) frameDeck(content string, width, height int) string {
+	dividerStyle := lipgloss.NewStyle()
+	if !m.plain {
+		dividerStyle = dividerStyle.Foreground(lipgloss.Color(m.theme.Border))
+		if m.theme.Surface != "" {
+			dividerStyle = dividerStyle.Background(lipgloss.Color(m.theme.Surface))
+		}
+	}
+	divider := dividerStyle.Render(strings.Repeat("─", max(1, width)))
+	return lipgloss.JoinVertical(lipgloss.Left,
+		divider,
+		fitTerminalView(content, width, max(1, height-1)),
+	)
+}
+
+func (m dashboardModel) actionRailView(s dashboardStyles, width, height int) string {
+	lines := []string{
+		s.focus.Render("PINNED & FREQUENT"),
+		s.muted.Render("Your order, then usage"),
+		"",
+	}
+	commands := m.availableCommands()
+	pins := make(map[string]struct{}, len(loadedConfig.UI.PinnedActions))
+	for _, pin := range loadedConfig.UI.PinnedActions {
+		pins[pin] = struct{}{}
+	}
+	limit := min(len(commands), min(8, max(4, (height-8)/2)))
+	for _, command := range commands[:limit] {
+		marker := "  "
+		if _, pinned := pins[dashboardCommandPinKey(command)]; pinned {
+			marker = "◆ "
+		}
+		lines = append(lines,
+			s.text.Render(marker+truncateText(command.Label, max(1, width-7))),
+			s.muted.Render("  "+truncateText(command.Description, max(1, width-7))),
+		)
+	}
+	if hidden := len(commands) - limit; hidden > 0 {
+		lines = append(lines, s.muted.Render(fmt.Sprintf("  +%d more", hidden)))
+	}
+	lines = append(lines, "", s.key.Render("[a]")+" "+s.muted.Render("open actions"))
+	return s.panel.BorderTop(false).BorderRight(false).BorderBottom(false).
+		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 1).
+		Render(strings.Join(lines, "\n"))
+}
+
+func (m dashboardModel) telemetryView(s dashboardStyles, width, height int) string {
+	host := m.selectedHost()
+	entry := m.telemetry[host.Target]
+	lines := []string{s.focus.Render("HOST PULSE")}
+	if host.Target == "" {
+		lines = append(lines, s.muted.Render("Select a host to begin sampling."))
+	} else if entry.Current.CollectedAt.IsZero() {
+		status := "Waiting for an online sample"
+		if entry.Failures > 0 {
+			status = fmt.Sprintf("Unavailable · retrying with backoff (%d)", entry.Failures)
+		}
+		lines = append(lines,
+			s.text.Render(displayName(host))+"  "+m.statusText(s, host.Reachability),
+			s.muted.Render(status),
+		)
+	} else {
+		sample := entry.Current
+		updated := relativeTime(sample.CollectedAt, time.Now())
+		lines = append(lines,
+			s.text.Render(displayName(host))+"  "+m.statusText(s, host.Reachability)+
+				s.muted.Render("  ·  sampled "+updated),
+			"",
+			s.text.Render("Uptime   ")+s.muted.Render(formatUptime(sample.Uptime)),
+			s.text.Render("Load     ")+s.muted.Render(fmt.Sprintf("%.2f across %d cores", sample.LoadOne, sample.CPUCores)),
+			s.text.Render("Memory   ")+s.muted.Render(capacityUsage(sample.MemoryUsed, sample.MemoryTotal)),
+			s.text.Render("Network  ")+s.live.Render("↓ "+formatByteRate(sample.NetworkRXRate))+
+				s.muted.Render("  ")+s.focus.Render("↑ "+formatByteRate(sample.NetworkTXRate)),
+		)
+		if len(sample.GPUs) > 0 {
+			lines = append(lines, "", s.focus.Render("GPU"))
+			for _, gpu := range sample.GPUs[:min(4, len(sample.GPUs))] {
+				detail := fmt.Sprintf("%d%%", gpu.Utilization)
+				if gpu.Temperature > 0 {
+					detail += fmt.Sprintf(" · %d°C", gpu.Temperature)
+				}
+				if gpu.MemoryTotal > 0 {
+					detail += " · " + capacityUsage(gpu.MemoryUsed, gpu.MemoryTotal) + " VRAM"
+				}
+				lines = append(lines, s.text.Render(truncateText(gpu.Name, max(12, width/2)))+
+					s.muted.Render("  "+detail))
+			}
+		}
+	}
+	if len(host.Disks) > 0 && len(lines) < height-5 {
+		disks := append([]diskUsage(nil), host.Disks...)
+		sort.SliceStable(disks, func(left, right int) bool {
+			return diskPercent(disks[left]) > diskPercent(disks[right])
+		})
+		lines = append(lines, "", s.focus.Render("STORAGE PRESSURE"))
+		for _, disk := range disks[:min(4, len(disks))] {
+			lines = append(lines, s.text.Render(padCell(truncateText(disk.Mountpoint, 16), 16))+
+				s.muted.Render(fmt.Sprintf(" %3.0f%%  %s / %s",
+					diskPercent(disk),
+					formatDecimalBytes(disk.UsedBytes),
+					formatDecimalBytes(disk.TotalBytes),
+				)))
+		}
+	}
+	return s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
+		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+}
+
+func (m dashboardModel) activityView(s dashboardStyles, width, height int) string {
+	lines := []string{s.focus.Render("ACTIVITY"), s.muted.Render("This session · newest first"), ""}
+	running := m.operation != nil && m.operation.Status == "running"
+	if running {
+		lines = append(lines,
+			s.warning.Render("◌ "+truncateText(m.operation.Label+" · "+m.operation.Host, max(1, width-6))),
+			s.muted.Render("  running "+compactDuration(time.Since(m.operation.StartedAt))),
+		)
+	}
+	if len(m.activities) == 0 && !running {
+		if m.operation != nil && m.operationPersisted {
+			lines = append(lines,
+				s.muted.Render("Previous session"),
+				s.text.Render("  "+truncateText(m.operation.Label+" · "+m.operation.Host, max(1, width-7))),
+				s.muted.Render("  "+truncateText(m.operation.Summary, max(1, width-7))),
+			)
+		} else {
+			lines = append(lines,
+				s.muted.Render("No operations yet."),
+				s.muted.Render("Run an action and its result will stay here."),
+			)
+		}
+	} else if len(m.activities) > 0 {
+		for index := len(m.activities) - 1; index >= 0; index-- {
+			event := m.activities[index]
+			icon := "✓"
+			status := s.success
+			if event.Status == "error" {
+				icon, status = "×", s.failure
+			}
+			subject := event.Label
+			if event.Host != "" {
+				subject += " · " + event.Host
+			}
+			lines = append(lines,
+				status.Render(icon+" "+truncateText(subject, max(1, width-6))),
+				s.muted.Render("  "+truncateText(valueOr(event.Summary, compactDuration(event.Duration)), max(1, width-7))),
+			)
+			if len(lines) >= height-5 {
+				break
+			}
+		}
+	}
+	if m.operation != nil && m.operation.Output != "" && len(lines) < height-4 {
+		lines = append(lines, "", s.focus.Render("LATEST OUTPUT"))
+		for _, line := range tailNonEmptyLines(m.operation.Output, max(1, height-len(lines)-3)) {
+			lines = append(lines, s.text.Render(truncateText(line, max(1, width-5))))
+		}
+	}
+	return s.panel.BorderRight(false).BorderTop(false).BorderBottom(false).
+		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+}
+
+func (m dashboardModel) consoleOutputView(s dashboardStyles, width, height int) string {
+	lines := []string{s.focus.Render("OPERATIONS CONSOLE")}
+	if m.operation == nil {
+		lines = append(lines, s.muted.Render("Run an action to keep its bounded remote output here."))
+	} else {
+		status := s.success
+		icon := "✓"
+		switch m.operation.Status {
+		case "running":
+			status, icon = s.warning, "◌"
+		case "error":
+			status, icon = s.failure, "×"
+		}
+		lines = append(lines,
+			status.Render(icon+" "+m.operation.Label)+s.muted.Render("  ·  "+m.operation.Host),
+			s.muted.Render(m.operation.Summary),
+			"",
+		)
+		output := m.operation.Output
+		if output == "" {
+			output = "(no captured output)"
+		}
+		for _, line := range tailNonEmptyLines(output, max(1, height-len(lines)-3)) {
+			lines = append(lines, s.text.Render(truncateText(line, max(1, width-6))))
+		}
+	}
+	return s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
+		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+}
+
+func (m dashboardModel) fleetDeckView(s dashboardStyles, width, height int) string {
+	lines := []string{
+		s.focus.Render("FLEET WORKSPACE"),
+		s.muted.Render("Cached inventory with explicit freshness · selected-host telemetry stays local to the workbench"),
+		"",
+	}
+	nameWidth := min(28, max(16, width/6))
+	for _, host := range m.hosts {
+		gpu := "GPU unknown"
+		if len(host.GPUs) > 0 {
+			gpu = host.GPUs[0]
+			if len(host.GPUs) > 1 {
+				gpu += fmt.Sprintf(" +%d", len(host.GPUs)-1)
+			}
+		}
+		freshness := "not scanned"
+		if !host.Updated.IsZero() {
+			freshness = relativeTime(host.Updated, time.Now())
+		}
+		line := padCell(truncateText(displayName(host), nameWidth), nameWidth) + "  " +
+			padCell(plainReachability(host.Reachability, m.probeTargets[host.Target]), 12) + "  " +
+			padCell(truncateText(valueOr(host.OS, "OS unknown"), 24), 24) + "  " +
+			padCell(truncateText(valueOr(host.Memory, "RAM unknown"), 12), 12) + "  " +
+			truncateText(gpu, max(12, width-nameWidth-62)) + "  " + freshness
+		lines = append(lines, s.text.Render(truncateText(line, max(1, width-6))))
+		if len(lines) >= height-3 {
+			break
+		}
+	}
+	return s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
+		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
+}
+
+func diskPercent(disk diskUsage) float64 {
+	if disk.TotalBytes == 0 {
+		return 0
+	}
+	return float64(disk.UsedBytes) * 100 / float64(disk.TotalBytes)
+}
+
+func capacityUsage(used, total uint64) string {
+	if total == 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%s / %s (%.0f%%)",
+		formatDecimalBytes(used), formatDecimalBytes(total),
+		float64(used)*100/float64(total),
+	)
+}
+
+func formatByteRate(value float64) string {
+	switch {
+	case value >= 1_000_000_000:
+		return fmt.Sprintf("%.1f GB/s", value/1_000_000_000)
+	case value >= 1_000_000:
+		return fmt.Sprintf("%.1f MB/s", value/1_000_000)
+	case value >= 1_000:
+		return fmt.Sprintf("%.1f KB/s", value/1_000)
+	default:
+		return fmt.Sprintf("%.0f B/s", value)
+	}
+}
+
+func formatUptime(duration time.Duration) string {
+	if duration < time.Hour {
+		return compactDuration(duration)
+	}
+	days := int(duration.Hours()) / 24
+	hours := int(duration.Hours()) % 24
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	return fmt.Sprintf("%dh %dm", hours, int(duration.Minutes())%60)
+}
+
+func compactDuration(duration time.Duration) string {
+	if duration < time.Second {
+		return fmt.Sprintf("%dms", max(1, duration.Milliseconds()))
+	}
+	if duration < time.Minute {
+		return fmt.Sprintf("%.1fs", duration.Seconds())
+	}
+	return fmt.Sprintf("%dm%02ds", int(duration.Minutes()), int(duration.Seconds())%60)
+}
+
+func tailNonEmptyLines(output string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	raw := strings.Split(sanitizeCommandOutput(output), "\n")
+	lines := make([]string, 0, len(raw))
+	for _, line := range raw {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	if len(lines) > limit {
+		lines = lines[len(lines)-limit:]
+	}
+	return lines
+}
+
+func appendActivity(events []activityEvent, event activityEvent) []activityEvent {
+	event.Label = sanitizeTerminalText(event.Label)
+	event.Host = sanitizeTerminalText(event.Host)
+	event.Summary = sanitizeTerminalText(event.Summary)
+	event.Output = sanitizeCommandOutput(event.Output)
+	events = append(events, event)
+	if len(events) > 5 {
+		events = append([]activityEvent(nil), events[len(events)-5:]...)
+	}
+	return events
 }
 
 type dashboardStyles struct {
@@ -1221,15 +1908,22 @@ func (m dashboardModel) styles() dashboardStyles {
 		selected = selected.Background(lipgloss.Color(t.Elevated))
 		selectedMuted = selectedMuted.Background(lipgloss.Color(t.Elevated))
 	}
+	semantic := func(color string) lipgloss.Style {
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+		if t.Surface != "" {
+			style = style.Background(lipgloss.Color(t.Surface))
+		}
+		return style
+	}
 	return dashboardStyles{
-		title:         lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(t.Focus)),
-		text:          lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text)),
-		muted:         lipgloss.NewStyle().Foreground(lipgloss.Color(t.Muted)),
-		focus:         lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(t.Focus)),
-		live:          lipgloss.NewStyle().Foreground(lipgloss.Color(t.Live)),
-		success:       lipgloss.NewStyle().Foreground(lipgloss.Color(t.Success)),
-		warning:       lipgloss.NewStyle().Foreground(lipgloss.Color(t.Warning)),
-		failure:       lipgloss.NewStyle().Foreground(lipgloss.Color(t.Error)),
+		title:         semantic(t.Focus).Bold(true),
+		text:          semantic(t.Text),
+		muted:         semantic(t.Muted),
+		focus:         semantic(t.Focus).Bold(true),
+		live:          semantic(t.Live),
+		success:       semantic(t.Success),
+		warning:       semantic(t.Warning),
+		failure:       semantic(t.Error),
 		panel:         panel,
 		selected:      selected,
 		selectedMuted: selectedMuted,
@@ -1656,6 +2350,44 @@ func (m dashboardModel) themePreviewView() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
 }
 
+func (m dashboardModel) workspacePreviewView() string {
+	s := m.styles()
+	width := min(max(48, m.width-16), 76)
+	lines := []string{
+		s.focus.Render("WORKSPACE"),
+		s.muted.Render("Choose how large terminals use their available space"),
+		"",
+	}
+	descriptions := map[string]string{
+		"workbench": "Host pulse, storage pressure, actions, and activity",
+		"console":   "Give remote output and recent operations more room",
+		"fleet":     "Compare cached facts and freshness across every host",
+	}
+	for index, name := range workspaceModes() {
+		line := fmt.Sprintf("%-12s %s", name, descriptions[name])
+		if index == m.workspaceCursor {
+			line = s.selected.Render("› " + padCell(line, width-6))
+		} else {
+			line = "  " + s.text.Render(line)
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines,
+		"",
+		s.muted.Render("Compact terminals keep the host-first layout in every mode."),
+		"",
+		s.muted.Render("[j/k] preview   [enter] use once   [s] save default"),
+		s.muted.Render("[esc] restore previous workspace"),
+	)
+	if m.workspaceSaving {
+		lines = append(lines, s.live.Render("◌ saving workspace…"))
+	} else if m.noticeError && strings.HasPrefix(m.notice, "Workspace save failed:") {
+		lines = append(lines, s.failure.Render(truncateText(m.notice, width-6)))
+	}
+	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+}
+
 func (m dashboardModel) fleetView() string {
 	s := m.styles()
 	width := min(max(42, m.width-16), 78)
@@ -1855,7 +2587,11 @@ func themeSwatch(t theme, plain bool) string {
 			blocks = append(blocks, "◆")
 			continue
 		}
-		blocks = append(blocks, lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render("◆"))
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+		if t.Surface != "" {
+			style = style.Background(lipgloss.Color(t.Surface))
+		}
+		blocks = append(blocks, style.Render("◆"))
 	}
 	return strings.Join(blocks, " ")
 }
@@ -2049,6 +2785,7 @@ func (a *app) runDashboard() error {
 	var resumeReachability map[string]reachabilityResult
 	var notice string
 	var noticeError bool
+	var resumeActivities []activityEvent
 	for {
 		hosts, err := a.readHosts()
 		if err != nil {
@@ -2066,6 +2803,9 @@ func (a *app) runDashboard() error {
 		model.indexMode = normalizeRemoteIndexMode(a.remoteIndex)
 		model.notice = notice
 		model.noticeError = noticeError
+		if len(resumeActivities) > 0 {
+			model.activities = append([]activityEvent(nil), resumeActivities...)
+		}
 		if len(resumeReachability) > 0 {
 			model.probing = false
 			model.probeInitial = nil
@@ -2100,7 +2840,33 @@ func (a *app) runDashboard() error {
 			resumeReachability[host.Target] = host.Reachability
 		}
 		resumeTarget = finalModel.choice.Host
+		resumeActivities = append([]activityEvent(nil), finalModel.activities...)
+		startedAt := time.Now()
 		err = a.executeDashboardSelection(finalModel.choice)
+		finishedAt := time.Now()
+		status := "success"
+		summary := actionLabel(finalModel.choice.Action) + " finished"
+		if err != nil {
+			status = "error"
+			summary = sanitizeTerminalText(err.Error())
+		}
+		if stateErr := recordLatestOperation(a.stateFile, operationSummary{
+			Action:     string(finalModel.choice.Action),
+			Label:      selectionLabel(finalModel.choice),
+			Host:       finalModel.choice.Host,
+			Status:     status,
+			Summary:    summary,
+			StartedAt:  startedAt,
+			FinishedAt: finishedAt,
+			Duration:   finishedAt.Sub(startedAt),
+		}); stateErr != nil {
+			logVerbose("failed to record latest operation: %v", stateErr)
+		}
+		resumeActivities = appendActivity(resumeActivities, activityEvent{
+			Label: selectionLabel(finalModel.choice), Host: finalModel.choice.Host,
+			Status: status, Summary: summary, FinishedAt: finishedAt,
+			Duration: finishedAt.Sub(startedAt),
+		})
 		if err != nil {
 			notice = actionLabel(finalModel.choice.Action) + " failed: " + sanitizeTerminalText(err.Error())
 			noticeError = true
@@ -2109,6 +2875,13 @@ func (a *app) runDashboard() error {
 		notice = actionLabel(finalModel.choice.Action) + " finished"
 		noticeError = false
 	}
+}
+
+func selectionLabel(selection dashboardSelection) string {
+	if selection.Action == actionCustom && strings.TrimSpace(selection.Command.Name) != "" {
+		return selection.Command.Name
+	}
+	return actionLabel(selection.Action)
 }
 
 func actionLabel(action dashboardAction) string {
@@ -2133,6 +2906,8 @@ func actionLabel(action dashboardAction) string {
 		return "Saved command"
 	case actionConfig:
 		return "Configuration"
+	case actionWorkspace:
+		return "Workspace"
 	default:
 		return "Action"
 	}
