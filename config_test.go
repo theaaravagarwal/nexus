@@ -53,13 +53,17 @@ func TestCommandsForTargetOverrideGlobalTagAndHost(t *testing.T) {
 	}
 }
 
-func TestCommandConfigSupportsInteractiveTerminalOwnership(t *testing.T) {
+func TestCommandConfigSupportsInteractiveOwnershipAndOptInConfirmation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	raw := `commands:
   - name: tmux attach
     description: Attach to tmux
     command: tmux attach
     interactive: true
+    confirm: true
+  - name: uptime
+    description: Show uptime
+    command: uptime
 `
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
@@ -68,8 +72,9 @@ func TestCommandConfigSupportsInteractiveTerminalOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Commands) != 1 || !cfg.Commands[0].Interactive {
-		t.Fatalf("interactive command was not preserved: %#v", cfg.Commands)
+	if len(cfg.Commands) != 2 || !cfg.Commands[0].Interactive || !cfg.Commands[0].Confirm ||
+		cfg.Commands[1].Confirm {
+		t.Fatalf("command policy was not preserved: %#v", cfg.Commands)
 	}
 }
 
@@ -108,12 +113,53 @@ func TestEnsureConfigFileAddsExamplesToExistingConfigOnce(t *testing.T) {
 	if count := strings.Count(string(raw), "# Add interactive: true"); count != 1 {
 		t.Fatalf("interactive note count=%d:\n%s", count, raw)
 	}
+	if count := strings.Count(string(raw), "# Commands run immediately by default."); count != 1 {
+		t.Fatalf("confirmation note count=%d:\n%s", count, raw)
+	}
 	cfg, err := loadAppConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.FullIndexDepth != 7 {
 		t.Fatalf("existing setting changed: %#v", cfg)
+	}
+}
+
+func TestEnsureConfigFileMigratesLegacyCommandComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `commands: []
+# Saved command examples (remove the leading # characters to use them):
+# commands:
+#   - name: disk usage
+#     description: Show free space on every mounted filesystem
+#     command: df -h
+# 2. A command available only to hosts tagged "prod":
+#       command: journalctl -u app -n 100 --no-pager
+# exact user@host:port. Nexus displays the exact command and asks before running.
+# Add interactive: true only for terminal-owning commands such as tmux attach.
+# Commands run immediately by default. Add confirm: true to require review.
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"id: disk-usage", "storage volumes", "protected command", "confirm: true", "Commands are trusted config",
+	} {
+		if !strings.Contains(string(saved), want) {
+			t.Fatalf("migrated comments missing %q:\n%s", want, saved)
+		}
+	}
+	for _, stale := range []string{"every mounted filesystem", "asks before running"} {
+		if strings.Contains(string(saved), stale) {
+			t.Fatalf("stale comment %q remains:\n%s", stale, saved)
+		}
 	}
 }
 
@@ -193,7 +239,7 @@ func TestDefaultConfigIncludesSavedCommandExamples(t *testing.T) {
 	config := defaultConfigYAML()
 	for _, want := range []string{
 		"choose Themes", "workspace: workbench", "pinned_actions:", "add: command:tmux",
-		"id: disk-usage", "disk usage", "journalctl -u app", "exact user@host:port",
+		"id: disk-usage", "disk usage", "journalctl -u app", "confirm: true", "exact user@host:port",
 	} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("default config missing %q", want)

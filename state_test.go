@@ -128,6 +128,30 @@ func TestLoadStateKeepsBackwardCompatibilityAndStructuredHardware(t *testing.T) 
 	}
 }
 
+func TestLoadStateFiltersLegacySystemMountNoise(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	state := nexusState{Version: 1, Hosts: map[string]hostActivity{
+		"alice@example.com": {
+			Disks: []diskUsage{
+				{Filesystem: "tmpfs", Mountpoint: "/run", TotalBytes: 10},
+				{Filesystem: "/dev/nvme0n1p2", Mountpoint: "/", UsedBytes: 50_000_000_000, TotalBytes: 100_000_000_000},
+				{Filesystem: "/dev/loop0", Mountpoint: "/snap/core/1", TotalBytes: 10},
+			},
+		},
+	}}
+	if err := saveState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := got.Hosts["alice@example.com"]
+	if len(entry.Disks) != 1 || entry.Disks[0].Mountpoint != "/" || entry.Disk != "50 GB / 100 GB (50%)" {
+		t.Fatalf("filtered state=%#v", entry)
+	}
+}
+
 func TestLatestOperationPersistsSummaryWithoutSessionOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	started := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)

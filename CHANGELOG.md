@@ -14,11 +14,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Cached remote OS, CPU, memory, disk, and supported-tool summaries refreshed through explicit system-info actions.
 - Built-in Nexus, Nord, Dracula, Catppuccin, Gruvbox, monochrome, and terminal themes.
 - Theme previews and configuration inspection commands.
-- Global, tag-inherited, and per-host custom remote commands with mandatory exact-command confirmation.
+- Global, tag-inherited, and per-host trusted remote commands with opt-in exact-command confirmation.
 - Host aliases, tags, OS labels, and commands in YAML configuration.
 - Confirmed `ssh-copy-id` setup for selected hosts, including saved non-default ports.
 - Workbench, Console, and Fleet dashboard workspaces with configurable pinned actions.
 - Lightweight selected-host telemetry for uptime, load, memory, network throughput, and GPU health.
+- Secure in-place OpenSSH terminal handoff for key, password, keyboard-interactive, host-key, and MFA authentication.
 
 ### Changed
 
@@ -28,7 +29,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Reachability results stream per host, authenticated system snapshots refresh without leaving the TUI, and terminal-owning actions return to the same selected host with completion or recovery status.
 - Pull and push path discovery now run inside a native TUI picker instead of dropping into an external FZF session.
 - Themes can now be previewed, applied, and saved as the default directly inside the TUI with a discoverable shortcut.
-- Saved-command setup now stays out of the primary TUI flow; concise global and tag-scoped examples live alongside the relevant YAML configuration, while exact-command confirmation remains in the TUI.
+- Saved-command setup stays out of the primary TUI flow; trusted commands run immediately by default, while `confirm: true` enables exact-command review.
 - The dashboard now uses a compact canonical key map (`j/k`, `Enter`, `/`, `a`, `h`, `q`); all operations live in the Actions list and every contextual key is shown where it applies.
 - Saved commands now keep bounded, sanitized output inside a scrollable Nexus result view; commands marked `interactive: true` can still temporarily own the terminal.
 - The Actions menu now uses concise names, accepts spaces in search, and keeps frequently used actions near the top.
@@ -46,6 +47,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Theme surfaces now paint consistently behind semantic text, selections, overlays, and dashboard panels.
 - Background telemetry uses a single bounded request with quiet exponential backoff and never changes host usage ordering.
 - Activity output and the latest operation remain inside Nexus, with only a concise previous-session summary persisted.
+- Storage views filter pseudo-filesystems, Snap/loop mounts, runtime mounts, and platform plumbing while retaining root, physical, external, WSL drive-letter, dataset, and network volumes.
+- Device-first storage rows now include responsive usage bars and pressure-aware theme colors.
 
 ## [0.1.0] - 2026-07-23
 

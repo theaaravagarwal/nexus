@@ -67,6 +67,14 @@ func loadState(path string) (nexusState, error) {
 	if state.Actions == nil {
 		state.Actions = map[string]int{}
 	}
+	for target, entry := range state.Hosts {
+		if len(entry.Disks) == 0 {
+			continue
+		}
+		entry.Disks = meaningfulStorageDisks(entry.Disks)
+		entry.Disk = legacyDiskSummary(entry.Disks)
+		state.Hosts[target] = entry
+	}
 	state.Version = 1
 	return state, nil
 }

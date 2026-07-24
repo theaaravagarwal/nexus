@@ -69,6 +69,10 @@ commands:
   - name: uptime
     description: Show uptime
     command: uptime
+    confirm: true
+  - name: date
+    description: Show date
+    command: date
 host_profiles:
   alice@example.com:2222:
     alias: lab
@@ -134,6 +138,7 @@ host_profiles:
 		t.Fatalf("declined custom command invoked a remote command:\nbefore:\n%s\nafter:\n%s", beforeDecline, afterDecline)
 	}
 	runRootCommandWithInput(t, app, "y\n", "run", "uptime", "alice@example.com:2222")
+	runRootCommand(t, app, "run", "date", "alice@example.com:2222")
 
 	runRootCommand(t, app, "host", "add", "bob@example.com:2200")
 	runRootCommand(t, app, "host", "remove", "bob@example.com:2200")

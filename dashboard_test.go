@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,8 +37,9 @@ func TestDashboardFiltersAndChoosesAction(t *testing.T) {
 	}
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(dashboardModel)
-	if cmd == nil || model.choice.Action != actionSSH || model.choice.Host != "bob@two:2222" {
-		t.Fatalf("choice=%#v cmd=%v", model.choice, cmd)
+	if cmd == nil || !model.terminalRunning || model.done || model.operation == nil ||
+		model.operation.Host != "bob@two:2222" || model.choice.Action != "" {
+		t.Fatalf("SSH handoff=%#v cmd=%v", model, cmd)
 	}
 }
 
@@ -121,7 +123,7 @@ func TestDashboardStorageOutputStaysInsideTUI(t *testing.T) {
 	model = updated.(dashboardModel)
 	view := ansiCSI.ReplaceAllString(model.View(), "")
 	for _, want := range []string{
-		"COMMAND OUTPUT", "Storage", "/dev/root", "/data", "500 GB / 1 TB", "1 TB / 2 TB",
+		"COMMAND OUTPUT", "Storage", "root @ /", "data @ /data", "500 GB / 1 TB", "1 TB / 2 TB", "█████░░░░░ 50%",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("storage result missing %q:\n%s", want, view)
@@ -161,8 +163,9 @@ func TestDashboardCopyKeyRequiresConfirmation(t *testing.T) {
 	}
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	model = updated.(dashboardModel)
-	if cmd == nil || !model.done || model.choice.Action != actionCopyKey {
-		t.Fatalf("confirmed copy key did not hand off terminal: cmd=%v choice=%#v", cmd, model.choice)
+	if cmd == nil || model.done || !model.terminalRunning || model.operation == nil ||
+		model.operation.Action != string(actionCopyKey) {
+		t.Fatalf("confirmed copy key did not hand off terminal: cmd=%v model=%#v", cmd, model)
 	}
 }
 
@@ -239,7 +242,9 @@ func TestDashboardConfigIsDiscoverableFromActions(t *testing.T) {
 func TestDashboardSavedCommandConfirmationStaysInContext(t *testing.T) {
 	previous := loadedConfig
 	loadedConfig = defaultAppConfig()
-	loadedConfig.Commands = []commandConfig{{Name: "uptime", Description: "Show uptime", Command: "uptime"}}
+	loadedConfig.Commands = []commandConfig{{
+		Name: "uptime", Description: "Show uptime", Command: "uptime", Confirm: true,
+	}}
 	t.Cleanup(func() { loadedConfig = previous })
 
 	model := newDashboardModel([]string{"alice@one"})
@@ -259,6 +264,66 @@ func TestDashboardSavedCommandConfirmationStaysInContext(t *testing.T) {
 	model = updated.(dashboardModel)
 	if cmd != nil || model.confirmOpen || model.done {
 		t.Fatalf("confirmation did not cancel in place: cmd=%v model=%#v", cmd, model)
+	}
+}
+
+func TestDashboardSavedCommandRunsImmediatelyUnlessConfirmationEnabled(t *testing.T) {
+	previous := loadedConfig
+	loadedConfig = defaultAppConfig()
+	loadedConfig.Commands = []commandConfig{{Name: "uptime", Description: "Show uptime", Command: "uptime"}}
+	t.Cleanup(func() { loadedConfig = previous })
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.commandOpen = true
+	model.commandQuery = "uptime"
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if cmd == nil || model.confirmOpen || !model.commandRunning || model.commandResult == nil ||
+		model.commandResult.Command.Name != "uptime" || model.done {
+		t.Fatalf("default saved command did not run in place: cmd=%v model=%#v", cmd, model)
+	}
+}
+
+func TestDashboardTerminalSSHSupportsPasswordPromptsAndReturnsInPlace(t *testing.T) {
+	selection := dashboardSelection{Action: actionSSH, Host: "alice@example.com:6023"}
+	command, err := buildDashboardTerminalCommand(selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(command.Args, " ")
+	for _, want := range []string{"-t -t", "-p 6023", "alice@example.com"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("interactive SSH args missing %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "BatchMode=yes") {
+		t.Fatalf("interactive SSH disabled password authentication: %s", joined)
+	}
+
+	model := newDashboardModel([]string{selection.Host})
+	updated, cmd := model.startTerminalAction(selection, nil)
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.terminalRunning || model.done {
+		t.Fatalf("SSH did not begin terminal handoff: cmd=%v model=%#v", cmd, model)
+	}
+	operationID := model.operationID
+	updated, _ = model.Update(terminalActionFinishedMsg{OperationID: operationID, Selection: selection})
+	model = updated.(dashboardModel)
+	if model.terminalRunning || model.done || model.notice != "SSH session ended" ||
+		len(model.activities) != 1 || model.activities[0].Summary != "SSH session ended" {
+		t.Fatalf("SSH did not return to the same dashboard: %#v", model)
+	}
+
+	model.startOperation(actionSSH, "SSH session", selection.Host)
+	updated, _ = model.Update(terminalActionFinishedMsg{
+		OperationID: model.operationID,
+		Selection:   selection,
+		Err:         errors.New("Password: super-secret"),
+	})
+	model = updated.(dashboardModel)
+	if strings.Contains(model.notice, "super-secret") || strings.Contains(model.operation.Summary, "super-secret") ||
+		model.notice != "SSH connection failed · check the host, credentials, or network" {
+		t.Fatalf("SSH auth failure leaked challenge text: %#v", model)
 	}
 }
 
@@ -434,6 +499,14 @@ func TestDashboardSavedCommandOutputStaysInsideNexus(t *testing.T) {
 	}
 }
 
+func TestSanitizeCommandOutputPreservesUsefulTableSpacing(t *testing.T) {
+	input := "\x1b[31mDEVICE\tMOUNT    USE\x1b[0m\nnvme0n1  /        76%\n"
+	got := sanitizeCommandOutput(input)
+	if got != "DEVICE    MOUNT    USE\nnvme0n1  /        76%" {
+		t.Fatalf("table spacing changed: %q", got)
+	}
+}
+
 func TestDashboardSelectedHostRowDoesNotLeakANSIFragments(t *testing.T) {
 	model := newDashboardModel([]string{"alice@192.168.0.66"})
 	model.width = 80
@@ -462,12 +535,13 @@ func TestDashboardInteractiveSavedCommandTemporarilyOwnsTerminal(t *testing.T) {
 		Action: actionCustom,
 		Host:   "alice@one",
 		Command: commandConfig{
-			Name: "tmux attach", Command: "tmux attach", Interactive: true,
+			Name: "tmux attach", Command: "tmux attach", Interactive: true, Confirm: true,
 		},
 	}
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	model = updated.(dashboardModel)
-	if cmd == nil || !model.done || model.choice.Action != actionCustom || model.commandResult != nil {
+	if cmd == nil || model.done || !model.terminalRunning || model.choice.Action != "" ||
+		model.commandResult != nil || model.operation == nil {
 		t.Fatalf("interactive saved command did not hand off the terminal: cmd=%v model=%#v", cmd, model)
 	}
 }
@@ -608,7 +682,7 @@ func TestDashboardViewsRemainInformativeAcrossWidths(t *testing.T) {
 			}
 		}
 		if width == 78 {
-			for _, want := range []string{"System", "NVIDIA RTX 4090", "34.4 GB", "2 mounted filesystems"} {
+			for _, want := range []string{"System", "NVIDIA RTX 4090", "34.4 GB", "2 storage volumes"} {
 				if !strings.Contains(view, want) {
 					t.Fatalf("medium layout missing %q:\n%s", want, view)
 				}
@@ -841,13 +915,54 @@ func TestDashboardLargeDiskInventoryUsesBoundedSummary(t *testing.T) {
 	model := newDashboardModelWithState([]string{"alice@one"}, state, now)
 	model.width, model.height = 100, 24
 	view := ansiCSI.ReplaceAllString(model.View(), "")
-	if !strings.Contains(view, "more · Actions → Storage shows all") {
+	if !strings.Contains(view, "more · Actions → Storage shows all volumes") {
 		t.Fatalf("large inventory did not explain progressive disclosure:\n%s", view)
 	}
 	assertTerminalBounds(t, model.View(), 100, 24, "large disk inventory")
 	full := renderStorageInventory(disks)
 	if !strings.Contains(full, "/mnt/volume-00") || !strings.Contains(full, "/mnt/volume-19") {
 		t.Fatalf("full storage inventory omitted mounted filesystems:\n%s", full)
+	}
+}
+
+func TestStorageUsageBarClampsAndRounds(t *testing.T) {
+	tests := []struct {
+		percent float64
+		want    string
+	}{
+		{-10, "░░░░░░░░░░"},
+		{0, "░░░░░░░░░░"},
+		{74, "███████░░░"},
+		{75, "████████░░"},
+		{89, "█████████░"},
+		{90, "█████████░"},
+		{100, "██████████"},
+		{120, "██████████"},
+	}
+	for _, test := range tests {
+		if got := storageUsageBar(test.percent, 10); got != test.want {
+			t.Fatalf("storageUsageBar(%v)=%q, want %q", test.percent, got, test.want)
+		}
+	}
+}
+
+func TestRenderStorageInventoryIsDeviceFirstFilteredAndANSIPlain(t *testing.T) {
+	disks := []diskUsage{
+		{Filesystem: "tmpfs", Mountpoint: "/run", FilesystemType: "tmpfs", TotalBytes: 10},
+		{Filesystem: "/dev/nvme0n1p2", Mountpoint: "/", FilesystemType: "ext4", UsedBytes: 760, TotalBytes: 1000},
+		{Filesystem: "/dev/loop0", Mountpoint: "/snap/core/1", FilesystemType: "squashfs", UsedBytes: 10, TotalBytes: 10},
+		{Filesystem: "/dev/sda", Mountpoint: "/data1", FilesystemType: "ext4", UsedBytes: 340, TotalBytes: 1000},
+	}
+	got := renderStorageInventory(disks)
+	for _, want := range []string{"VOLUME @ MOUNT", "nvme0n1p2 @ /", "sda @ /data1", "████████░░  76%"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("storage inventory missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"tmpfs", "loop0", "\x1b"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("storage inventory retained %q:\n%s", unwanted, got)
+		}
 	}
 }
 

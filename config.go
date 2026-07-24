@@ -18,6 +18,7 @@ type commandConfig struct {
 	Description string `yaml:"description"`
 	Command     string `yaml:"command"`
 	Interactive bool   `yaml:"interactive,omitempty"`
+	Confirm     bool   `yaml:"confirm,omitempty"`
 }
 
 type uiConfig struct {
@@ -140,7 +141,8 @@ fzf:
   prompt: "Nexus ❯ "
   pointer: "→"
 
-# Commands here are available for every host. Nexus always asks before running.
+# Commands here are available for every host. They run immediately by default.
+# Add confirm: true to commands that should require an exact-command review.
 commands: []
 
 # Commands inherited by every host with a matching tag.
@@ -165,18 +167,20 @@ const savedCommandExamplesYAML = `
 # commands:
 #   - id: disk-usage
 #     name: disk usage
-#     description: Show free space on every mounted filesystem
+#     description: Show free space on storage volumes
 #     command: df -h
 #
-# 2. A command available only to hosts tagged "prod":
+# 2. A protected command available only to hosts tagged "prod":
 # tag_commands:
 #   prod:
 #     - name: recent service logs
 #       description: Show the last 100 lines from the app service
 #       command: journalctl -u app -n 100 --no-pager
+#       confirm: true
 #
 # Put a commands list inside one host_profiles entry to limit commands to that
-# exact user@host:port. Nexus displays the exact command and asks before running.
+# exact user@host:port. Commands are trusted config.
+# Commands run immediately by default. Add confirm: true to require review.
 # Add interactive: true only for terminal-owning commands such as tmux attach.
 `
 
@@ -185,16 +189,54 @@ func ensureSavedCommandExamples(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read config file %s: %w", configPath, err)
 	}
+	original := append([]byte(nil), raw...)
+	for _, replacement := range [][2]string{
+		{
+			"#   - name: disk usage",
+			"#   - id: disk-usage\n#     name: disk usage",
+		},
+		{
+			"#     description: Show free space on every mounted filesystem",
+			"#     description: Show free space on storage volumes",
+		},
+		{
+			`# 2. A command available only to hosts tagged "prod":`,
+			`# 2. A protected command available only to hosts tagged "prod":`,
+		},
+		{
+			"# exact user@host:port. Nexus displays the exact command and asks before running.",
+			"# exact user@host:port. Commands are trusted config.",
+		},
+	} {
+		raw = bytes.ReplaceAll(raw, []byte(replacement[0]), []byte(replacement[1]))
+	}
+	journalExample := []byte("#       command: journalctl -u app -n 100 --no-pager")
+	if bytes.Contains(raw, journalExample) && !bytes.Contains(raw, []byte("#       confirm: true")) {
+		raw = bytes.Replace(raw, journalExample,
+			append(append([]byte(nil), journalExample...), []byte("\n#       confirm: true")...), 1)
+	}
 	hasExamples := bytes.Contains(raw, []byte("# Saved command examples"))
 	hasInteractiveNote := bytes.Contains(raw, []byte("# Add interactive: true"))
-	if hasExamples && hasInteractiveNote {
+	hasConfirmationNote := bytes.Contains(raw, []byte("# Commands run immediately by default."))
+	if hasExamples && hasInteractiveNote && hasConfirmationNote {
+		if bytes.Equal(raw, original) {
+			return nil
+		}
+		if err := atomicWritePrivate(configPath, raw); err != nil {
+			return fmt.Errorf("failed to refresh saved-command examples: %w", err)
+		}
 		return nil
 	}
 	raw = bytes.TrimRight(raw, "\r\n")
 	if !hasExamples {
 		raw = append(raw, []byte("\n"+savedCommandExamplesYAML)...)
 	} else {
-		raw = append(raw, []byte("\n# Add interactive: true only for terminal-owning commands such as tmux attach.\n")...)
+		if !hasConfirmationNote {
+			raw = append(raw, []byte("\n# Commands run immediately by default. Add confirm: true to require review.\n")...)
+		}
+		if !hasInteractiveNote {
+			raw = append(raw, []byte("# Add interactive: true only for terminal-owning commands such as tmux attach.\n")...)
+		}
 	}
 	if err := atomicWritePrivate(configPath, raw); err != nil {
 		return fmt.Errorf("failed to add saved-command examples: %w", err)

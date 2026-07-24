@@ -65,16 +65,22 @@ The default `nexus` theme is anchored by:
   Terminal-owning actions restore the same selected host when they finish.
 - Saved commands display bounded, sanitized stdout/stderr in a scrollable TUI
   result view. Only commands explicitly marked `interactive` temporarily own
-  the terminal.
+  the terminal. Trusted commands run immediately by default; `confirm: true`
+  opts into exact-command review.
+- Interactive SSH and `ssh-copy-id` hand the controlling terminal directly to
+  OpenSSH, preserving native password, keyboard-interactive, host-key, and MFA
+  prompts without Nexus reading or retaining credentials. Completion restores
+  the same selected host and workspace.
 - Activity holds five bounded events in memory and previews current output.
   State persists one task summary—never remote output or an accumulating
   history—and ignores stale async completions after a newer action begins.
 - Selected-host telemetry is lightweight and session-only. It permits one
   noninteractive SSH request at a time, pauses when inappropriate, and backs off
   quietly on failure without changing frecency, action use, or persisted state.
-- Static storage inventories stay in the same result view. Cached detail uses
-  decimal GB/TB and a bounded mounted-filesystem summary; the Storage action
-  exposes the complete inventory.
+- Storage views describe user-meaningful volumes rather than raw `df` rows.
+  Root, physical/external, WSL drive-letter, dataset, and network volumes use
+  decimal GB/TB with pressure bars; runtime, Snap, loop, and platform plumbing
+  stay hidden. The Storage action exposes the complete filtered inventory.
 - The footer shows the four primary workspace actions and points to `h` for the
   complete key reference. Active work, completion, and recovery replace that
   secondary hint when relevant.

@@ -144,6 +144,92 @@ func TestMetadataScriptIncludesAdditiveWSLAndNativeGPUBackends(t *testing.T) {
 	}
 }
 
+func TestStorageInventoryScriptUsesTypedPortableFallback(t *testing.T) {
+	for _, want := range []string{"df -PkT", "df -Pk", `printf "DISK=%s\t%s\t%.0f\t%.0f\t%.0f\t%s\n"`} {
+		if !strings.Contains(storageInventoryScript, want) {
+			t.Fatalf("storage script missing %q", want)
+		}
+	}
+}
+
+func TestParseMetadataKeepsMeaningfulVolumesAndFiltersSystemMounts(t *testing.T) {
+	const gib = 1_000_000_000
+	tests := []struct {
+		name  string
+		lines []string
+		want  []string
+	}{
+		{
+			name: "native Linux",
+			lines: []string{
+				fmt.Sprintf("DISK=tmpfs\t/run\t0\t%d\t%d\ttmpfs", gib, gib),
+				fmt.Sprintf("DISK=/dev/nvme0n1p2\t/\t%d\t%d\t%d\text4", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=/dev/nvme0n1p1\t/boot/efi\t1\t%d\t%d\tvfat", gib, gib),
+				fmt.Sprintf("DISK=/dev/loop0\t/snap/core/1\t%d\t0\t%d\tsquashfs", gib, gib),
+				fmt.Sprintf("DISK=/dev/sda\t/data1\t%d\t%d\t%d\text4", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=/dev/sdb1\t/run/media/user/USB\t%d\t%d\t%d\texfat", gib, 3*gib, 4*gib),
+			},
+			want: []string{"/dev/nvme0n1p2@/", "/dev/sda@/data1", "/dev/sdb1@/run/media/user/USB"},
+		},
+		{
+			name: "WSL",
+			lines: []string{
+				fmt.Sprintf("DISK=none\t/usr/lib/wsl/lib\t0\t%d\t%d\toverlay", gib, gib),
+				fmt.Sprintf("DISK=drivers\t/usr/lib/wsl/drivers\t%d\t%d\t%d\t9p", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=/dev/sdd\t/\t%d\t%d\t%d\text4", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=C:\\\t/mnt/c\t%d\t%d\t%d\t9p", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=D:\\\t/mnt/d\t%d\t%d\t%d\t9p", gib, 3*gib, 4*gib),
+				fmt.Sprintf("DISK=snapfuse\t/snap/snapd/1\t%d\t0\t%d\tfuse.snapfuse", gib, gib),
+			},
+			want: []string{"/dev/sdd@/", `C:\@/mnt/c`, `D:\@/mnt/d`},
+		},
+		{
+			name: "macOS and remote filesystems",
+			lines: []string{
+				fmt.Sprintf("DISK=/dev/disk3s1s1\t/\t%d\t%d\t%d\tapfs", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=/dev/disk3s5\t/System/Volumes/Data\t%d\t%d\t%d\tapfs", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=/dev/disk4s1\t/Volumes/Backup\t%d\t%d\t%d\tapfs", gib, 3*gib, 4*gib),
+				fmt.Sprintf("DISK=tank/data\t/data\t%d\t%d\t%d\tzfs", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=server:/archive\t/archive\t%d\t%d\t%d\tnfs4", gib, gib, 2*gib),
+			},
+			want: []string{"/dev/disk3s1s1@/", "server:/archive@/archive", "tank/data@/data", "/dev/disk4s1@/Volumes/Backup"},
+		},
+		{
+			name: "legacy unknown is conservative",
+			lines: []string{
+				fmt.Sprintf("DISK=custom-volume\t/custom\t%d\t%d\t%d", gib, gib, 2*gib),
+				fmt.Sprintf("DISK=tmpfs\t/run/user/1000\t0\t%d\t%d", gib, gib),
+			},
+			want: []string{"custom-volume@/custom"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := parseMetadata(strings.Join(test.lines, "\n"))
+			got := make([]string, 0, len(snapshot.Disks))
+			for _, disk := range snapshot.Disks {
+				got = append(got, disk.Filesystem+"@"+disk.Mountpoint)
+			}
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("volumes=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestStorageFilteringRetainsDistinctMountsAndRootOverlay(t *testing.T) {
+	disks := []diskUsage{
+		{Filesystem: "overlay", Mountpoint: "/", FilesystemType: "overlay", TotalBytes: 10},
+		{Filesystem: "overlay", Mountpoint: "/containers/a", FilesystemType: "overlay", TotalBytes: 10},
+		{Filesystem: "tank", Mountpoint: "/data/a", FilesystemType: "zfs", TotalBytes: 100},
+		{Filesystem: "tank", Mountpoint: "/data/b", FilesystemType: "zfs", TotalBytes: 100},
+	}
+	got := meaningfulStorageDisks(disks)
+	if len(got) != 3 || got[0].Mountpoint != "/" {
+		t.Fatalf("filtered volumes=%#v", got)
+	}
+}
+
 func TestFormatDecimalBytesUsesSIUnits(t *testing.T) {
 	tests := []struct {
 		bytes uint64

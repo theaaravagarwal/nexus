@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ var (
 type diskUsage struct {
 	Filesystem     string `json:"filesystem"`
 	Mountpoint     string `json:"mountpoint"`
+	FilesystemType string `json:"filesystem_type,omitempty"`
 	UsedBytes      uint64 `json:"used_bytes"`
 	AvailableBytes uint64 `json:"available_bytes"`
 	TotalBytes     uint64 `json:"total_bytes"`
@@ -69,6 +71,25 @@ func (output *boundedMetadataOutput) Write(chunk []byte) (int, error) {
 func (output *boundedMetadataOutput) String() string {
 	return output.buffer.String()
 }
+
+// GNU df exposes filesystem types; macOS, BSD, and smaller BusyBox builds may
+// not. The fallback keeps the legacy five-field record so older targets remain
+// supported and filtering can make a conservative decision.
+const storageInventoryScript = `if LC_ALL=C df -PkT / >/dev/null 2>&1; then
+  LC_ALL=C df -PkT 2>/dev/null |
+    awk 'NR > 1 && NF >= 7 && $3 ~ /^[0-9]+$/ && $3 > 0 {
+      mount=$7
+      for (field=8; field<=NF; field++) mount=mount " " $field
+      printf "DISK=%s\t%s\t%.0f\t%.0f\t%.0f\t%s\n", $1, mount, $4 * 1024, $5 * 1024, $3 * 1024, $2
+    }'
+else
+  LC_ALL=C df -Pk 2>/dev/null |
+    awk 'NR > 1 && NF >= 6 && $2 ~ /^[0-9]+$/ && $2 > 0 {
+      mount=$6
+      for (field=7; field<=NF; field++) mount=mount " " $field
+      printf "DISK=%s\t%s\t%.0f\t%.0f\t%.0f\n", $1, mount, $3 * 1024, $4 * 1024, $2 * 1024
+    }'
+fi`
 
 // The wire format is deliberately line-oriented and requires only POSIX sh,
 // awk, df and common platform utilities. Numeric values stay in bytes so Linux
@@ -172,12 +193,7 @@ else
   printf '%s\n' "$gpu_records"
 fi
 
-LC_ALL=C df -Pk 2>/dev/null |
-  awk 'NR > 1 && NF >= 6 && $2 ~ /^[0-9]+$/ && $2 > 0 {
-    mount=$6
-    for (field=7; field<=NF; field++) mount=mount " " $field
-    printf "DISK=%s\t%s\t%.0f\t%.0f\t%.0f\n", $1, mount, $3 * 1024, $4 * 1024, $2 * 1024
-  }'
+` + storageInventoryScript + `
 
 tools=""
 for tool in btop htop top duf ncdu df nload speedtest nvidia-smi rocm-smi; do
@@ -311,7 +327,7 @@ func parseMetadata(output string) hostMetadataSnapshot {
 				continue
 			}
 			disk, ok := parseDiskUsage(rawValue)
-			if !ok {
+			if !ok || !isMeaningfulStorageDisk(disk) {
 				continue
 			}
 			dedupe := disk.Filesystem + "\x00" + disk.Mountpoint
@@ -349,6 +365,7 @@ func parseMetadata(output string) hostMetadataSnapshot {
 		}
 		snapshot.GPUs = append(snapshot.GPUs, label)
 	}
+	snapshot.Disks = meaningfulStorageDisks(snapshot.Disks)
 	return snapshot
 }
 
@@ -408,7 +425,7 @@ func normalizeGPUIdentity(label string) string {
 
 func parseDiskUsage(value string) (diskUsage, bool) {
 	fields := strings.Split(value, "\t")
-	if len(fields) != 5 {
+	if len(fields) != 5 && len(fields) != 6 {
 		return diskUsage{}, false
 	}
 	filesystem := sanitizeMetadataValue(fields[0])
@@ -416,13 +433,120 @@ func parseDiskUsage(value string) (diskUsage, bool) {
 	used, usedErr := strconv.ParseUint(sanitizeMetadataValue(fields[2]), 10, 64)
 	available, availableErr := strconv.ParseUint(sanitizeMetadataValue(fields[3]), 10, 64)
 	total, totalErr := strconv.ParseUint(sanitizeMetadataValue(fields[4]), 10, 64)
+	filesystemType := ""
+	if len(fields) == 6 {
+		filesystemType = strings.ToLower(sanitizeMetadataValue(fields[5]))
+	}
 	if filesystem == "" || mountpoint == "" || usedErr != nil || availableErr != nil || totalErr != nil || total == 0 {
 		return diskUsage{}, false
 	}
 	return diskUsage{
-		Filesystem: filesystem, Mountpoint: mountpoint,
+		Filesystem: filesystem, Mountpoint: mountpoint, FilesystemType: filesystemType,
 		UsedBytes: used, AvailableBytes: available, TotalBytes: total,
 	}, true
+}
+
+func isMeaningfulStorageDisk(disk diskUsage) bool {
+	source := strings.ToLower(strings.TrimSpace(disk.Filesystem))
+	mountpoint := strings.TrimSpace(disk.Mountpoint)
+	filesystemType := strings.ToLower(strings.TrimSpace(disk.FilesystemType))
+
+	// Root is the primary capacity signal even when a container or WSL reports
+	// it through an overlay rather than a conventional block-device source.
+	if mountpoint == "/" {
+		return true
+	}
+	if source == "" || mountpoint == "" {
+		return false
+	}
+
+	switch filesystemType {
+	case "proc", "procfs", "sysfs", "devfs", "devtmpfs", "devpts",
+		"tmpfs", "ramfs", "cgroup", "cgroup2", "pstore", "securityfs",
+		"debugfs", "tracefs", "configfs", "fusectl", "mqueue", "hugetlbfs",
+		"rpc_pipefs", "binfmt_misc", "nsfs", "autofs", "squashfs",
+		"fuse.snapfuse", "overlay":
+		return false
+	}
+	for _, prefix := range []string{"/dev/loop", "/dev/ram", "/dev/zram"} {
+		if strings.HasPrefix(source, prefix) {
+			return false
+		}
+	}
+	switch source {
+	case "none", "rootfs", "tmpfs", "devtmpfs", "udev", "drivers", "snapfuse":
+		return false
+	}
+	for _, prefix := range []string{
+		"/proc", "/sys", "/dev", "/snap", "/init", "/tmp",
+		"/usr/lib/wsl", "/mnt/wsl", "/system/volumes",
+	} {
+		lowerMount := strings.ToLower(mountpoint)
+		if lowerMount == prefix || strings.HasPrefix(lowerMount, prefix+"/") {
+			return false
+		}
+	}
+	lowerMount := strings.ToLower(mountpoint)
+	if lowerMount == "/boot" || strings.HasPrefix(lowerMount, "/boot/") {
+		return false
+	}
+	if (lowerMount == "/run" || strings.HasPrefix(lowerMount, "/run/")) &&
+		!strings.HasPrefix(lowerMount, "/run/media/") {
+		return false
+	}
+
+	// WSL exposes Windows volumes as drive-letter sources mounted directly
+	// beneath /mnt. Other 9p entries are WSL plumbing and were rejected above.
+	if len(source) >= 2 && source[1] == ':' &&
+		len(lowerMount) == len("/mnt/x") && strings.HasPrefix(lowerMount, "/mnt/") {
+		return true
+	}
+	if strings.HasPrefix(source, "/dev/") || strings.HasPrefix(source, "uuid=") ||
+		strings.HasPrefix(source, "label=") {
+		return true
+	}
+	switch filesystemType {
+	case "apfs", "hfs", "hfsplus", "zfs", "btrfs", "nfs", "nfs4",
+		"cifs", "smbfs", "fuse.sshfs", "sshfs", "9p", "drvfs":
+		return true
+	}
+
+	// Legacy five-field records do not contain a filesystem type. Keep unknown
+	// non-system mounts rather than silently deleting a legitimate custom,
+	// network, or external volume from cached state.
+	return true
+}
+
+func meaningfulStorageDisks(disks []diskUsage) []diskUsage {
+	result := make([]diskUsage, 0, len(disks))
+	seen := make(map[string]struct{}, len(disks))
+	for _, disk := range disks {
+		if !isMeaningfulStorageDisk(disk) {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(disk.Filesystem)) + "\x00" +
+			strings.TrimSpace(disk.Mountpoint) + "\x00" + strconv.FormatUint(disk.TotalBytes, 10)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, disk)
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].Mountpoint == "/" {
+			return result[right].Mountpoint != "/"
+		}
+		if result[right].Mountpoint == "/" {
+			return false
+		}
+		leftPercent := float64(result[left].UsedBytes) / float64(result[left].TotalBytes)
+		rightPercent := float64(result[right].UsedBytes) / float64(result[right].TotalBytes)
+		if leftPercent != rightPercent {
+			return leftPercent > rightPercent
+		}
+		return result[left].Mountpoint < result[right].Mountpoint
+	})
+	return result
 }
 
 func sanitizeMetadataValue(value string) string {

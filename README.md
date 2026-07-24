@@ -9,13 +9,13 @@ CLI for SSH sessions and remote file sync workflows.
 - Open the `rip`-inspired host dashboard by running `nexus` with no command.
 - SSH into `user@host`, `user@host:port`, IPv4, or bracketed IPv6 targets.
 - Pull and push files/directories over `rsync` with interactive path selection.
-- Inspect remote CPU, GPU, decimal RAM, network, and every mounted filesystem with portable fallbacks.
+- Inspect remote CPU, GPU, decimal RAM, network, and meaningful storage volumes with portable fallbacks.
 - Host history persisted in `~/.config/nexus/hosts.json`.
 - Reachable hosts sort first, with zoxide-style frequency and recency ordering inside each status group.
 - Saved-port reachability and TCP latency without background SSH authentication.
 - Rich responsive workspace with host dossiers, topology, command palette, and contextual help.
 - Seven built-in themes plus semantic color overrides in YAML.
-- Confirmed custom commands inherited globally, by tag, or per host.
+- Trusted custom commands inherited globally, by tag, or per host, with opt-in confirmation.
 - Install your local SSH key through a confirmed action that respects the saved port.
 - Remote indexing modes:
   - `lazy` (default): shallow listing for faster navigation.
@@ -156,6 +156,9 @@ The Actions list contains pull, push, SSH key installation, selected/all
 connection checks, background system refresh, system/network/storage tools,
 fleet, themes, configuration, and saved commands. Storage inventories and
 ordinary saved-command output stay in a scrollable Nexus result view.
+Interactive SSH temporarily hands the terminal to OpenSSH, so native key,
+password, keyboard-interactive, host-key, and MFA prompts work securely before
+Nexus restores the same workspace.
 
 ## Configuration
 
@@ -190,7 +193,8 @@ fzf:
   prompt: "Nexus ❯ "
   pointer: "→"
 
-# Available for every host. Nexus always previews and confirms custom commands.
+# Available for every host. Trusted commands run immediately by default.
+# Add confirm: true when Nexus should review the exact command and target.
 commands: []
 
 # Inherited by hosts with matching tags.
@@ -208,6 +212,7 @@ host_profiles:
         description: Follow application logs
         command: journalctl -u app -f
         interactive: true
+        confirm: true
     use_unix_discovery: true
     rsync_stability: true
 ```
@@ -248,11 +253,13 @@ Config keys:
 - `reachability.*`: bounds saved-target DNS/TCP checks; these are not SSH/login latency checks.
 - `fzf.layout`: `default`, `reverse`, or `reverse-list`.
 - `fzf.prompt` / `fzf.pointer`: picker text and selection marker.
-- `commands`: global confirmed remote commands.
+- `commands`: global trusted remote commands.
 - `tag_commands.<tag>`: commands inherited by matching host tags.
 - `host_profiles.<target>.alias` / `tags` / `os` / `commands`: TUI metadata and per-host commands.
 - `commands[].interactive`: set to `true` only when a command needs to own the
   terminal, such as `tmux attach`; ordinary command output stays inside Nexus.
+- `commands[].confirm`: set to `true` to require an exact command/target review;
+  omitted or `false` runs the trusted configured command immediately.
 - `host_profiles.<host>.use_unix_discovery`: force Unix-style discovery commands for that host.
 - `host_profiles.<host>.rsync_stability`: enables conservative `rsync` profile for reliability on mixed environments.
 
