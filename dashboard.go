@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,6 +99,10 @@ type configuredCommandMsg struct {
 	Err    error
 }
 
+type actionUsageMsg struct {
+	Err error
+}
+
 type configuredCommandResult struct {
 	Host    string
 	Command commandConfig
@@ -145,6 +150,7 @@ type dashboardModel struct {
 	commandResult    *configuredCommandResult
 	commandRunning   bool
 	commandOffset    int
+	actionUses       map[string]int
 	transfer         *transferFlow
 	helpOpen         bool
 	themeOpen        bool
@@ -182,10 +188,14 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 		showTopology: false,
 		probeTargets: make(map[string]bool),
 		metadataBusy: make(map[string]bool),
+		actionUses:   make(map[string]int, len(state.Actions)),
 		indexMode:    "lazy",
 		plain:        noColorRequested(),
 		theme:        activeTheme(),
 		now:          now,
+	}
+	for action, count := range state.Actions {
+		model.actionUses[action] = count
 	}
 	for _, target := range safe {
 		profile := profileForTarget(target)
@@ -492,6 +502,11 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case actionUsageMsg:
+		if msg.Err != nil {
+			logVerbose("failed to record action usage: %v", msg.Err)
+		}
+		return m, nil
 	case transferScanMsg:
 		if m.transfer == nil || m.transfer.Stage != msg.Stage {
 			return m, nil
@@ -565,6 +580,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.confirmOpen {
 		switch key {
 		case "y":
+			usageCmd := m.recordActionUsage(actionCustom, m.confirmAction.Command)
 			if !m.confirmAction.Command.Interactive {
 				selection := m.confirmAction
 				m.confirmOpen = false
@@ -574,11 +590,11 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandResult = &configuredCommandResult{
 					Host: selection.Host, Command: selection.Command,
 				}
-				return m, m.configuredCommandCmd(selection.Host, selection.Command.Command)
+				return m, tea.Batch(usageCmd, m.configuredCommandCmd(selection.Host, selection.Command.Command))
 			}
 			m.choice = m.confirmAction
 			m.done = true
-			return m, tea.Quit
+			return m, tea.Sequence(usageCmd, tea.Quit)
 		case "esc":
 			m.confirmOpen = false
 			m.confirmAction = dashboardSelection{}
@@ -637,6 +653,11 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandQuery = ""
 				m.commandCursor = 0
 			}
+		case " ":
+			if m.commandFiltering {
+				m.commandQuery += " "
+				m.commandCursor = 0
+			}
 		case "k":
 			if m.commandFiltering {
 				m.commandQuery += "k"
@@ -656,16 +677,22 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			command := commands[m.commandCursor]
+			var usageCmd tea.Cmd
+			if command.Action != actionCustom {
+				usageCmd = m.recordActionUsage(command.Action, command.Command)
+			}
 			switch command.Action {
 			case actionPull, actionPush:
 				m.commandOpen = false
 				m.commandQuery = ""
-				return m.startTransfer(command.Action)
+				updated, commandCmd := m.startTransfer(command.Action)
+				return updated, tea.Batch(usageCmd, commandCmd)
 			case actionInfo:
 				m.commandOpen = false
 				m.commandFiltering = false
 				m.commandQuery = ""
-				return m.startMetadataRefresh()
+				updated, commandCmd := m.startMetadataRefresh()
+				return updated, tea.Batch(usageCmd, commandCmd)
 			case actionProbe:
 				m.commandOpen = false
 				m.commandFiltering = false
@@ -673,30 +700,31 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				target := m.selectedTarget()
 				if target != "" && !m.probing {
 					m, command := m.beginProbe([]string{target})
-					return m, command
+					return m, tea.Batch(usageCmd, command)
 				}
-				return m, nil
+				return m, usageCmd
 			case actionProbeAll:
 				m.commandOpen = false
 				m.commandFiltering = false
 				m.commandQuery = ""
 				if !m.probing {
 					m, command := m.beginProbe(m.allTargets())
-					return m, command
+					return m, tea.Batch(usageCmd, command)
 				}
-				return m, nil
+				return m, usageCmd
 			case actionFleet:
 				m.commandOpen = false
 				m.commandFiltering = false
 				m.showTopology = true
-				return m, nil
+				return m, usageCmd
 			case actionThemes:
 				m.commandOpen = false
 				m.commandFiltering = false
 				m.openThemePreview()
-				return m, nil
+				return m, usageCmd
 			case actionConfig:
-				return m.choose(actionConfig)
+				updated, commandCmd := m.choose(actionConfig)
+				return updated, tea.Sequence(usageCmd, commandCmd)
 			}
 			if command.Action == actionCustom {
 				m.commandOpen = false
@@ -706,7 +734,8 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			return m.choose(command.Action)
+			updated, commandCmd := m.choose(command.Action)
+			return updated, tea.Sequence(usageCmd, commandCmd)
 		default:
 			if m.commandFiltering && msg.Type == tea.KeyRunes {
 				m.commandQuery += sanitizeTerminalText(string(msg.Runes))
@@ -789,6 +818,31 @@ func (m dashboardModel) configuredCommandCmd(host, command string) tea.Cmd {
 	}
 }
 
+func dashboardActionUsageKey(action dashboardAction, command commandConfig) string {
+	if action == actionCustom {
+		return "custom:" + strings.ToLower(strings.TrimSpace(command.Name))
+	}
+	return string(action)
+}
+
+func (m *dashboardModel) recordActionUsage(action dashboardAction, command commandConfig) tea.Cmd {
+	key := dashboardActionUsageKey(action, command)
+	if key == "" {
+		return nil
+	}
+	if m.actionUses == nil {
+		m.actionUses = map[string]int{}
+	}
+	m.actionUses[key]++
+	statePath := m.statePath
+	if statePath == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		return actionUsageMsg{Err: recordActionUse(statePath, key)}
+	}
+}
+
 func (m *dashboardModel) moveCursor(delta int) {
 	if len(m.filtered) == 0 {
 		m.cursor = 0
@@ -854,31 +908,42 @@ func (m dashboardModel) displayNameForTarget(target string) string {
 
 func (m dashboardModel) availableCommands() []dashboardCommand {
 	if m.selectedTarget() == "" {
-		return []dashboardCommand{
-			{Label: "Theme preview", Description: "Preview Nexus themes", Action: actionThemes},
-			{Label: "Edit configuration", Description: "Commands, profiles, and themes", Action: actionConfig},
+		commands := []dashboardCommand{
+			{Label: "Themes", Description: "Preview or save a theme", Action: actionThemes},
+			{Label: "Config", Description: "Commands, profiles, and themes", Action: actionConfig},
 		}
+		m.sortCommandsByUsage(commands)
+		return commands
 	}
 	commands := []dashboardCommand{
 		{"Connect", "Open SSH session", actionSSH, commandConfig{}},
-		{"Pull files", "Download from remote", actionPull, commandConfig{}},
-		{"Push files", "Upload to remote", actionPush, commandConfig{}},
-		{"Refresh snapshot", "Scan system details in the background", actionInfo, commandConfig{}},
-		{"Check connection", "Refresh selected host reachability", actionProbe, commandConfig{}},
-		{"Check every host", "Refresh all reachability", actionProbeAll, commandConfig{}},
-		{"System monitor", "Open the best available monitor", actionTop, commandConfig{}},
-		{"Network tools", "Open remote network diagnostics", actionNet, commandConfig{}},
-		{"Storage tools", "Inspect disk usage", actionStorage, commandConfig{}},
-		{"Fleet overview", "Inspect saved peers", actionFleet, commandConfig{}},
-		{"Theme preview", "Preview Nexus themes", actionThemes, commandConfig{}},
+		{"Pull", "Download from remote", actionPull, commandConfig{}},
+		{"Push", "Upload to remote", actionPush, commandConfig{}},
+		{"Refresh info", "Update system details", actionInfo, commandConfig{}},
+		{"Check host", "Refresh this connection", actionProbe, commandConfig{}},
+		{"Check all", "Refresh every connection", actionProbeAll, commandConfig{}},
+		{"Monitor", "Open system monitor", actionTop, commandConfig{}},
+		{"Network", "Open network diagnostics", actionNet, commandConfig{}},
+		{"Storage", "Inspect disk usage", actionStorage, commandConfig{}},
+		{"Fleet", "Inspect saved hosts", actionFleet, commandConfig{}},
+		{"Themes", "Preview or save a theme", actionThemes, commandConfig{}},
 	}
 	for _, command := range commandsForTarget(m.selectedTarget()) {
 		commands = append(commands, dashboardCommand{
 			Label: command.Name, Description: command.Description, Action: actionCustom, Command: command,
 		})
 	}
-	commands = append(commands, dashboardCommand{"Edit configuration", "Commands, profiles, and themes", actionConfig, commandConfig{}})
+	commands = append(commands, dashboardCommand{"Config", "Commands, profiles, and themes", actionConfig, commandConfig{}})
+	m.sortCommandsByUsage(commands)
 	return commands
+}
+
+func (m dashboardModel) sortCommandsByUsage(commands []dashboardCommand) {
+	sort.SliceStable(commands, func(left, right int) bool {
+		leftUses := m.actionUses[dashboardActionUsageKey(commands[left].Action, commands[left].Command)]
+		rightUses := m.actionUses[dashboardActionUsageKey(commands[right].Action, commands[right].Command)]
+		return leftUses > rightUses
+	})
 }
 
 func (m dashboardModel) filteredCommands() []dashboardCommand {
@@ -1092,14 +1157,22 @@ func (m dashboardModel) hostRow(s dashboardStyles, host dashboardHost, width int
 		name = target.Host
 	}
 	status := m.statusText(s, host.Reachability)
-	firstGap := max(1, width-lipgloss.Width(name)-lipgloss.Width(status)-2)
-	first := "  " + truncateText(name, max(8, width-lipgloss.Width(status)-3)) + strings.Repeat(" ", firstGap) + status
+	firstName := truncateText(name, max(8, width-lipgloss.Width(status)-3))
+	firstGap := max(1, width-lipgloss.Width(firstName)-lipgloss.Width(status)-2)
+	first := "  " + firstName + strings.Repeat(" ", firstGap) + status
 	target := truncateText(host.Target, max(10, width-15))
 	last := relativeTime(host.LastUsed, m.now)
 	secondGap := max(1, width-lipgloss.Width(target)-lipgloss.Width(last)-2)
 	second := "  " + target + strings.Repeat(" ", secondGap) + last
 	if selected {
-		first = s.selected.Render("› " + padCell(strings.TrimPrefix(first, "  "), width-2))
+		selectedStatus := plainReachability(host.Reachability, m.probeTargets[host.Target])
+		if m.probeTargets[host.Target] && host.Reachability.Status != reachUnknown {
+			selectedStatus += " ↻"
+		}
+		selectedName := truncateText(name, max(8, width-lipgloss.Width(selectedStatus)-3))
+		selectedGap := max(1, width-lipgloss.Width(selectedName)-lipgloss.Width(selectedStatus)-2)
+		selectedLine := selectedName + strings.Repeat(" ", selectedGap) + selectedStatus
+		first = s.selected.Render("› " + padCell(selectedLine, width-2))
 		secondLines := strings.Split(second, "\n")
 		for i := range secondLines {
 			secondLines[i] = s.selectedMuted.Render(padCell(secondLines[i], width))

@@ -214,8 +214,10 @@ How to use the config:
 3. Under `host_profiles`, use the full saved target when profiles differ by user or port.
 4. Save and return to Nexus; aliases, tags, and commands reload automatically.
 
-For themes, press `a`, choose **Theme preview**, move with `j/k`, then press
+For themes, press `a`, choose **Themes**, move with `j/k`, then press
 `enter` to use one for the current session or `s` to save it as the default.
+Actions with the highest local usage count rise to the top of the menu; unused
+actions retain their predictable default order.
 
 Useful configuration commands:
 

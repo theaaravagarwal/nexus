@@ -70,6 +70,6 @@ state without moving the user's current selection.
 ## Themes and configuration
 
 Built-in themes share identical semantic roles and component behavior. Open
-Actions with `a`, choose Theme preview, then use `Enter` for the session or `s`
+Actions with `a`, choose Themes, then use `Enter` for the session or `s`
 to save the YAML default. Advanced users can still override semantic colors in
 YAML. Theme choice applies consistently to the TUI, help, and FZF.

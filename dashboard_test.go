@@ -58,7 +58,7 @@ func TestDashboardActionListDispatchesExpectedCommands(t *testing.T) {
 
 func TestDashboardTransferDiscoveryStaysInsideTUI(t *testing.T) {
 	pull := newDashboardModel([]string{"alice@one:2222"})
-	pull, cmd := chooseDashboardAction(t, pull, "pull files")
+	pull, cmd := chooseDashboardAction(t, pull, "pull")
 	if cmd == nil || pull.transfer == nil || pull.transfer.Stage != transferScanRemoteSource || pull.done {
 		t.Fatalf("pull scan escaped TUI: cmd=%v model=%#v", cmd, pull)
 	}
@@ -74,7 +74,7 @@ func TestDashboardTransferDiscoveryStaysInsideTUI(t *testing.T) {
 	}
 
 	push := newDashboardModel([]string{"alice@one:2222"})
-	push, cmd = chooseDashboardAction(t, push, "push files")
+	push, cmd = chooseDashboardAction(t, push, "push")
 	if cmd == nil || push.transfer == nil || push.transfer.Stage != transferScanLocalSource || push.done {
 		t.Fatalf("push local scan escaped TUI: cmd=%v model=%#v", cmd, push)
 	}
@@ -96,7 +96,7 @@ func TestDashboardTransferDiscoveryStaysInsideTUI(t *testing.T) {
 
 func TestDashboardSystemRefreshStaysInsideTUI(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one:2222"})
-	got, cmd := chooseDashboardAction(t, model, "refresh snapshot")
+	got, cmd := chooseDashboardAction(t, model, "refresh info")
 	if cmd == nil || got.done || got.choice.Action != "" || !got.metadataBusy["alice@one:2222"] {
 		t.Fatalf("refresh escaped TUI: choice=%#v done=%v busy=%v cmd=%v", got.choice, got.done, got.metadataBusy, cmd)
 	}
@@ -124,7 +124,7 @@ func TestDashboardProbeResultsStreamPerHost(t *testing.T) {
 
 func TestDashboardConfigIsDiscoverableFromActions(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
-	model, cmd := chooseDashboardAction(t, model, "edit config")
+	model, cmd := chooseDashboardAction(t, model, "config")
 	if cmd == nil || !model.done || model.choice.Action != actionConfig {
 		t.Fatalf("saved-command shortcut did not open config: cmd=%v model=%#v", cmd, model)
 	}
@@ -170,6 +170,45 @@ func TestDashboardNavigationAndCommandFilter(t *testing.T) {
 	commands := model.filteredCommands()
 	if len(commands) != 1 || commands[0].Action != actionStorage {
 		t.Fatalf("filtered commands=%#v", commands)
+	}
+}
+
+func TestDashboardActionFilterAcceptsSpaces(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'a'}},
+		{Type: tea.KeyRunes, Runes: []rune{'/'}},
+		{Type: tea.KeyRunes, Runes: []rune("check")},
+		{Type: tea.KeySpace},
+		{Type: tea.KeyRunes, Runes: []rune("host")},
+	} {
+		updated, _ := model.Update(key)
+		model = updated.(dashboardModel)
+	}
+	commands := model.filteredCommands()
+	if model.commandQuery != "check host" {
+		t.Fatalf("query=%q, want %q", model.commandQuery, "check host")
+	}
+	if len(commands) != 1 || commands[0].Action != actionProbe {
+		t.Fatalf("filtered commands=%#v", commands)
+	}
+}
+
+func TestDashboardActionsAreRankedByRecordedUsage(t *testing.T) {
+	state := nexusState{
+		Hosts: map[string]hostActivity{},
+		Actions: map[string]int{
+			string(actionStorage): 7,
+			string(actionSSH):     3,
+		},
+	}
+	model := newDashboardModelWithState([]string{"alice@one"}, state, time.Now())
+	commands := model.availableCommands()
+	if commands[0].Action != actionStorage || commands[1].Action != actionSSH {
+		t.Fatalf("actions were not usage-ranked: %#v", commands[:2])
+	}
+	if commands[2].Action != actionPull || commands[3].Action != actionPush {
+		t.Fatalf("unused actions lost their stable default order: %#v", commands[2:4])
 	}
 }
 
@@ -232,7 +271,7 @@ func TestDashboardConnectionChecksRunFromActions(t *testing.T) {
 	model.probing = false
 	model.probeInitial = nil
 	model.probeTargets = map[string]bool{}
-	model, cmd := chooseDashboardAction(t, model, "check connection")
+	model, cmd := chooseDashboardAction(t, model, "check host")
 	if cmd == nil || !model.probing || model.probeTotal != 1 {
 		t.Fatalf("selected connection check did not start: cmd=%v model=%#v", cmd, model)
 	}
@@ -240,7 +279,7 @@ func TestDashboardConnectionChecksRunFromActions(t *testing.T) {
 	model.probing = false
 	model.probeInitial = nil
 	model.probeTargets = map[string]bool{}
-	model, cmd = chooseDashboardAction(t, model, "check every")
+	model, cmd = chooseDashboardAction(t, model, "check all")
 	if cmd == nil || !model.probing || model.probeTotal != 2 {
 		t.Fatalf("all connection check did not start: cmd=%v model=%#v", cmd, model)
 	}
@@ -282,6 +321,27 @@ func TestDashboardSavedCommandOutputStaysInsideNexus(t *testing.T) {
 	}
 	if strings.Contains(view, "[31m") || strings.Contains(view, "[0m") {
 		t.Fatalf("remote ANSI fragments reached the TUI:\n%q", view)
+	}
+}
+
+func TestDashboardSelectedHostRowDoesNotLeakANSIFragments(t *testing.T) {
+	model := newDashboardModel([]string{"alice@192.168.0.66"})
+	model.width = 80
+	model.height = 24
+	model.hosts[0].Reachability = reachabilityResult{
+		Target:  "alice@192.168.0.66",
+		Status:  reachOnline,
+		Latency: 4 * time.Millisecond,
+	}
+	view := model.View()
+	plain := ansiCSI.ReplaceAllString(view, "")
+	for _, fragment := range []string{"[38;", "[0m"} {
+		if strings.Contains(plain, fragment) {
+			t.Fatalf("selected host row leaked ANSI fragment %q:\n%q", fragment, plain)
+		}
+	}
+	if !strings.Contains(plain, "192.168.0.66") || !strings.Contains(plain, "● 4ms") {
+		t.Fatalf("selected host row lost content:\n%q", plain)
 	}
 }
 

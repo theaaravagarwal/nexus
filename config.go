@@ -101,7 +101,7 @@ func ensureConfigFile(configPath string) error {
 func defaultConfigYAML() string {
 	return `# Nexus settings
 # Open this file with: nexus config
-# In the TUI, press a and choose Theme preview.
+# In the TUI, press a and choose Themes.
 
 full_index_depth: 5
 

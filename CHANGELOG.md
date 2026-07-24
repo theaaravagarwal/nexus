@@ -28,6 +28,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Saved-command setup now stays out of the primary TUI flow; concise global and tag-scoped examples live alongside the relevant YAML configuration, while exact-command confirmation remains in the TUI.
 - The dashboard now uses a compact canonical key map (`j/k`, `Enter`, `/`, `a`, `h`, `q`); all operations live in the Actions list and every contextual key is shown where it applies.
 - Saved commands now keep bounded, sanitized output inside a scrollable Nexus result view; commands marked `interactive: true` can still temporarily own the terminal.
+- The Actions menu now uses concise names, accepts spaces in search, and keeps frequently used actions near the top.
+- Selected host rows no longer expose terminal color-control fragments in narrow or highlighted layouts.
 - Nexus configuration and state files use private permissions, atomic locked updates, strict YAML fields, and terminal-control sanitization.
 - Remote diagnostics avoid login-shell startup files and use portable system and network summaries when optional probe utilities are unavailable.
 - Interactive SSH sessions distinguish remote shell exit codes from connection failures.

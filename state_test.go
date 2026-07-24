@@ -73,3 +73,19 @@ func TestConcurrentActivityUpdatesDoNotLoseScores(t *testing.T) {
 		t.Fatalf("score=%v, want %d", got, updates)
 	}
 }
+
+func TestRecordActionUsePersistsCounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	for range 3 {
+		if err := recordActionUse(path, string(actionStorage)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Actions[string(actionStorage)]; got != 3 {
+		t.Fatalf("storage action count=%d, want 3", got)
+	}
+}

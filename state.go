@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -31,10 +32,11 @@ type hostActivity struct {
 type nexusState struct {
 	Version int                     `json:"version"`
 	Hosts   map[string]hostActivity `json:"hosts"`
+	Actions map[string]int          `json:"actions,omitempty"`
 }
 
 func loadState(path string) (nexusState, error) {
-	state := nexusState{Version: 1, Hosts: map[string]hostActivity{}}
+	state := nexusState{Version: 1, Hosts: map[string]hostActivity{}, Actions: map[string]int{}}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil
@@ -48,8 +50,24 @@ func loadState(path string) (nexusState, error) {
 	if state.Hosts == nil {
 		state.Hosts = map[string]hostActivity{}
 	}
+	if state.Actions == nil {
+		state.Actions = map[string]int{}
+	}
 	state.Version = 1
 	return state, nil
+}
+
+func recordActionUse(path, action string) error {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return nil
+	}
+	return updateState(path, func(state *nexusState) {
+		if state.Actions == nil {
+			state.Actions = map[string]int{}
+		}
+		state.Actions[action]++
+	})
 }
 
 func saveState(path string, state nexusState) error {

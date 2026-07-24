@@ -160,7 +160,7 @@ commands:
 
 func TestDefaultConfigIncludesSavedCommandExamples(t *testing.T) {
 	config := defaultConfigYAML()
-	for _, want := range []string{"choose Theme preview", "disk usage", "journalctl -u app", "exact user@host:port"} {
+	for _, want := range []string{"choose Themes", "disk usage", "journalctl -u app", "exact user@host:port"} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("default config missing %q", want)
 		}
