@@ -14,6 +14,10 @@ type fzfConfig struct {
 	Prompt   string            `yaml:"prompt"`
 	Pointer  string            `yaml:"pointer"`
 	Keybinds map[string]string `yaml:"keybinds"`
+	// Retained so strict YAML decoding accepts configs created before the
+	// interactive path navigator moved into the TUI.
+	LegacyBackKey   string `yaml:"back_key,omitempty"`
+	LegacyReloadKey string `yaml:"reload_key,omitempty"`
 }
 
 var fzfUIConfig = defaultFZFConfig()

@@ -14,6 +14,8 @@ func TestLoadAppConfigPreservesLegacyAndAddsUIDefaults(t *testing.T) {
 fzf:
   theme: cyberpunk
   layout: reverse
+  back_key: f1
+  reload_key: ctrl-r
 host_profiles:
   example.com:
     use_unix_discovery: true
