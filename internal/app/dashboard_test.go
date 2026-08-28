@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func chooseDashboardAction(t *testing.T, model dashboardModel, query string) (dashboardModel, tea.Cmd) {
@@ -412,6 +413,7 @@ func TestDashboardUsesOneCanonicalWorkspaceKeyMap(t *testing.T) {
 
 	for _, want := range []string{
 		"j / k        move between hosts",
+		"tab          cycle workspace tabs on wide screens",
 		"a            all actions and saved commands",
 		"LISTS         j/k move · enter choose · esc back",
 		"THEME         s save default",
@@ -422,6 +424,54 @@ func TestDashboardUsesOneCanonicalWorkspaceKeyMap(t *testing.T) {
 		if !strings.Contains(model.View(), want) {
 			t.Fatalf("key reference missing %q:\n%s", want, model.View())
 		}
+	}
+}
+
+func TestDashboardWideWorkspaceTabsCycleWithoutAffectingCompactLayouts(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one", "bob@two"})
+	model.plain = true
+	model.width, model.height = 150, 32
+
+	for _, label := range []string{"WORKBENCH", "CONSOLE", "FLEET"} {
+		if !strings.Contains(model.View(), label) {
+			t.Fatalf("wide header missing workspace tab %q:\n%s", label, model.View())
+		}
+	}
+	for _, context := range []string{"HOSTS · j/k move", "[tab] workspace"} {
+		if !strings.Contains(model.View(), context) {
+			t.Fatalf("wide layout missing keyboard context %q:\n%s", context, model.View())
+		}
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(dashboardModel)
+	if model.workspace != "console" || !strings.Contains(model.View(), "OPERATIONS CONSOLE") {
+		t.Fatalf("tab did not open console workspace: workspace=%q\n%s", model.workspace, model.View())
+	}
+	if strings.Contains(model.View(), "PINNED & FREQUENT") {
+		t.Fatalf("console workspace retained the workbench action rail:\n%s", model.View())
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(dashboardModel)
+	if model.workspace != "fleet" || !strings.Contains(model.View(), "FLEET WORKSPACE") {
+		t.Fatalf("second tab did not open fleet workspace: workspace=%q\n%s", model.workspace, model.View())
+	}
+	if strings.Contains(model.View(), "HOST PULSE") {
+		t.Fatalf("fleet workspace retained workbench telemetry:\n%s", model.View())
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = updated.(dashboardModel)
+	if model.workspace != "console" {
+		t.Fatalf("shift+tab workspace=%q, want console", model.workspace)
+	}
+
+	model.width = 149
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(dashboardModel)
+	if model.workspace != "console" {
+		t.Fatalf("compact layout unexpectedly changed workspace to %q", model.workspace)
 	}
 }
 
@@ -562,6 +612,35 @@ func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
 	for _, want := range []string{"THEMES", "use once", "save default"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("theme preview missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestDashboardSelectedThemeRowDoesNotExposeANSIFragments(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	previousConfig := loadedConfig
+	loadedConfig = defaultAppConfig()
+	t.Cleanup(func() { loadedConfig = previousConfig })
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = false
+	model.theme = themes["nexus"]
+	model.width, model.height = 116, 16
+	model.openThemePreview()
+	view := model.View()
+	assertTerminalBounds(t, view, model.width, model.height, "theme preview")
+	plain := ansiCSI.ReplaceAllString(view, "")
+	for _, fragment := range []string{"[38;", "[48;", "[0m", "[1;"} {
+		if strings.Contains(plain, fragment) {
+			t.Fatalf("selected theme row exposed ANSI fragment %q:\n%s", fragment, plain)
+		}
+	}
+	for _, want := range []string{"› nexus", "violet signal", "default", "13 palettes", "more ↓"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("theme preview missing %q:\n%s", want, plain)
 		}
 	}
 }
@@ -1004,6 +1083,279 @@ func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 			}
 			assertTerminalBounds(t, model.View(), size[0], size[1], overlay)
 		}
+	}
+}
+
+func TestDashboardCompactOverlaysKeepContextAndRecoveryVisible(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*dashboardModel)
+		want  []string
+	}{
+		{"help", func(model *dashboardModel) { model.helpOpen = true }, []string{"NEXUS KEYS", "enter connect", "esc closes this view"}},
+		{"actions", func(model *dashboardModel) { model.commandOpen = true }, []string{"ACTIONS", "enter choose", "esc close"}},
+		{"themes", func(model *dashboardModel) { model.openThemePreview() }, []string{"THEMES", "enter] use", "esc] back"}},
+		{"workspace", func(model *dashboardModel) { model.openWorkspacePreview() }, []string{"WORKSPACE", "enter] use", "esc] back"}},
+		{"fleet", func(model *dashboardModel) { model.showTopology = true }, []string{"FLEET", "alice@one", "[esc] back"}},
+		{"transfer", func(model *dashboardModel) {
+			model.transfer = &transferFlow{
+				Action: actionPull, Stage: transferPickRemoteSource,
+				Host: "alice@one", Items: []string{"projects/", "notes.txt"},
+			}
+		}, []string{"PULL · REMOTE SOURCE", "alice@one", "enter", "esc cancel"}},
+		{"confirm", func(model *dashboardModel) {
+			model.confirmOpen = true
+			model.confirmAction = dashboardSelection{
+				Action: actionCustom, Host: "alice@one",
+				Command: commandConfig{Name: "uptime", Command: "uptime"},
+			}
+		}, []string{"CONFIRM SAVED COMMAND", "alice@one", "[y] run", "[esc] cancel"}},
+		{"output", func(model *dashboardModel) {
+			model.commandResult = &configuredCommandResult{
+				Host: "alice@one", Command: commandConfig{Name: "uptime"}, Output: "up 4 days",
+			}
+		}, []string{"COMMAND OUTPUT", "uptime", "r again", "esc back"}},
+	}
+
+	for _, size := range [][2]int{{30, 10}, {40, 12}} {
+		for _, test := range tests {
+			t.Run(fmt.Sprintf("%s/%dx%d", test.name, size[0], size[1]), func(t *testing.T) {
+				model := newDashboardModel([]string{"alice@one"})
+				model.plain = true
+				model.width, model.height = size[0], size[1]
+				test.setup(&model)
+				view := model.View()
+				assertTerminalBounds(t, view, size[0], size[1], test.name)
+				for _, want := range test.want {
+					if !strings.Contains(view, want) {
+						t.Fatalf("compact %s missing %q at %dx%d:\n%s", test.name, want, size[0], size[1], view)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestDashboardConfirmationWrapsAndScrollsExactDetails(t *testing.T) {
+	command := "printf  'λeta-release-with-a-very-long-name'"
+	model := newDashboardModel([]string{"operator@long-hostname.example:2222"})
+	model.plain = true
+	model.width, model.height = 30, 10
+	model.confirmOpen = true
+	model.confirmAction = dashboardSelection{
+		Action: actionCustom,
+		Host:   "operator@long-hostname.example:2222",
+		Command: commandConfig{
+			Name: "release check", Command: command,
+		},
+	}
+
+	width := model.overlayContentWidth(model.overlayWidth(76))
+	wrapped := wrapTerminalText(command, max(1, width-lipgloss.Width("Command  ")))
+	if got := strings.Join(wrapped, ""); got != command {
+		t.Fatalf("wrapped command changed: %q", got)
+	}
+	target := model.confirmAction.Host
+	wrappedTarget := wrapTerminalText(target, max(1, width-lipgloss.Width("Target  ")))
+	if got := strings.Join(wrappedTarget, ""); got != target {
+		t.Fatalf("wrapped target changed: %q", got)
+	}
+
+	var views []string
+	for range len(model.confirmReviewLines(width)) + 1 {
+		view := model.View()
+		assertTerminalBounds(t, view, model.width, model.height, "confirmation scroll")
+		if !strings.Contains(view, "[esc] cancel") {
+			t.Fatalf("confirmation recovery action disappeared:\n%s", view)
+		}
+		views = append(views, view)
+		updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		model = updated.(dashboardModel)
+	}
+	all := strings.Join(views, "\n")
+	for _, want := range []string{"operator@long-ho", "stname.example:2", "λeta-r", "elease-with-a-v", "SSH access."} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("scrollable confirmation never exposed %q:\n%s", want, all)
+		}
+	}
+}
+
+func TestDashboardFilterCounterDistinguishesMatchesFromSavedHosts(t *testing.T) {
+	hosts := []string{
+		"match-01", "match-02", "match-03", "match-04",
+		"other-01", "other-02", "other-03", "other-04",
+		"other-05", "other-06", "other-07", "other-08",
+	}
+	model := newDashboardModel(hosts)
+	model.plain = true
+	model.width, model.height = 80, 24
+	model.query = "match"
+	model.filtering = true
+	model.applyFilter()
+	if view := model.View(); !strings.Contains(view, "/ 4 matches · 12 saved") {
+		t.Fatalf("filtered inventory context is unclear:\n%s", view)
+	}
+}
+
+func TestDashboardHeaderHierarchyStaysResponsiveAtBreakpoints(t *testing.T) {
+	for _, width := range []int{59, 60, 71, 72, 95, 96, 149, 150} {
+		model := newDashboardModel([]string{"alice@one", "bob@two"})
+		model.plain = true
+		model.width, model.height = width, 32
+		view := model.View()
+		assertTerminalBounds(t, view, width, model.height, "header breakpoint")
+		if width == 149 && !strings.Contains(view, "choose a host") {
+			t.Fatalf("regular workspace context disappeared:\n%s", view)
+		}
+		if width == 150 && !strings.Contains(view, "WORKBENCH") {
+			t.Fatalf("ultra-wide workspace context missing:\n%s", view)
+		}
+		if count := strings.Count(view, "probing "); count != 1 {
+			t.Fatalf("probing status repeated %d times at width %d:\n%s", count, width, view)
+		}
+	}
+}
+
+func TestDashboardNOColorConstructorProducesPlainView(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	model := newDashboardModel([]string{"alice@one"})
+	model.width, model.height = 100, 30
+	if !model.plain {
+		t.Fatal("NO_COLOR did not select the plain dashboard path")
+	}
+	if view := model.View(); strings.Contains(view, "\x1b[") {
+		t.Fatalf("NO_COLOR dashboard contains ANSI escapes: %q", view)
+	}
+}
+
+func TestDashboardOpaqueThemePaintsEveryVisibleCell(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	for _, size := range [][2]int{{40, 12}, {100, 30}, {160, 36}} {
+		model := newDashboardModel([]string{"alice@one", "bob@two"})
+		model.plain = false
+		model.theme = themes["nexus"]
+		model.width, model.height = size[0], size[1]
+		view := model.View()
+		lines := strings.Split(view, "\n")
+		if len(lines) != model.height {
+			t.Fatalf("opaque canvas size=%dx%d height=%d", model.width, model.height, len(lines))
+		}
+		for lineIndex, line := range lines {
+			if width := lipgloss.Width(line); width != model.width {
+				t.Fatalf("opaque canvas size=%dx%d line=%d width=%d: %q", model.width, model.height, lineIndex, width, line)
+			}
+		}
+		assertEveryVisibleCellHasBackground(t, view)
+	}
+}
+
+func TestDashboardPanelRestoresSurfaceAfterNestedStyleReset(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = false
+	model.theme = themes["nexus"]
+	s := model.styles()
+	panel := model.renderPanel(s.panel, s.focus.Render("SYSTEM")+" gap")
+	surfacePrefix := terminalStylePrefix(
+		lipgloss.NewStyle().Background(lipgloss.Color(model.theme.Surface)),
+	)
+	if !strings.Contains(panel, "\x1b[0m"+surfacePrefix) {
+		t.Fatalf("panel did not restore its surface after a nested reset: %q", panel)
+	}
+}
+
+func TestTerminalColorStateConsumesExtendedColorPayloadsAtomically(t *testing.T) {
+	for _, sequence := range []string{
+		"\x1b[48;2;49;39;0m",
+		"\x1b[48;5;49m",
+	} {
+		foregroundSet, backgroundSet := false, false
+		updateTerminalColorState(sequence, &foregroundSet, &backgroundSet)
+		if !backgroundSet {
+			t.Fatalf("extended background payload was parsed as an SGR reset: %q", sequence)
+		}
+	}
+
+	foregroundSet, backgroundSet := false, false
+	updateTerminalColorState("\x1b[38;2;39;49;0m", &foregroundSet, &backgroundSet)
+	if !foregroundSet {
+		t.Fatal("extended foreground payload was parsed as an SGR reset")
+	}
+}
+
+func TestDashboardOpaqueThemesDoNotLeaveRootColorBands(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	for name, theme := range themes {
+		if theme.Surface == "" {
+			continue
+		}
+		model := newDashboardModel([]string{"alice@one", "bob@two"})
+		model.plain = false
+		model.theme = theme
+		model.width, model.height = 185, 68
+		surfacePrefix := terminalStylePrefix(
+			lipgloss.NewStyle().Background(lipgloss.Color(theme.Surface)),
+		)
+		surfaceParameters := strings.TrimSuffix(strings.TrimPrefix(surfacePrefix, "\x1b["), "m")
+		for lineIndex, line := range strings.Split(model.View(), "\n") {
+			if !strings.Contains(line, surfaceParameters) {
+				t.Fatalf("theme=%s left line %d without a painted surface", name, lineIndex)
+			}
+		}
+	}
+}
+
+func TestDashboardTransparentThemeLeavesCanvasUnpainted(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = false
+	model.theme = themes["terminal"]
+	model.width, model.height = 100, 30
+	if view := model.View(); strings.Contains(view, "\x1b[48;") {
+		t.Fatalf("transparent theme painted a background: %q", view)
+	}
+}
+
+func assertEveryVisibleCellHasBackground(t *testing.T, view string) {
+	t.Helper()
+	foregroundSet, backgroundSet := false, false
+	line, column := 1, 1
+	for index := 0; index < len(view); {
+		if view[index] == '\x1b' && index+1 < len(view) && view[index+1] == '[' {
+			end := index + 2
+			for end < len(view) && (view[end] < 0x40 || view[end] > 0x7e) {
+				end++
+			}
+			if end < len(view) {
+				if view[end] == 'm' {
+					updateTerminalColorState(view[index:end+1], &foregroundSet, &backgroundSet)
+				}
+				index = end + 1
+				continue
+			}
+		}
+		if view[index] == '\n' {
+			line, column = line+1, 1
+			index++
+			continue
+		}
+		if view[index] >= 0x20 && !backgroundSet {
+			t.Fatalf("visible cell has no background at %d:%d", line, column)
+		}
+		column++
+		index++
 	}
 }
 

@@ -100,16 +100,21 @@ func fzfColorByTheme(theme string) string {
 		return "dark,fg+:51,hl:45,pointer:51,marker:45,header:207"
 	default:
 		t := resolvedTheme(theme)
+		base := "dark"
+		if source, ok := themes[normalizeThemeName(theme)]; ok && themeUsesLightCanvas(source) {
+			base = "light"
+		}
 		if strings.HasPrefix(t.Focus, "#") {
 			if t.Elevated == "" {
-				return fmt.Sprintf("dark,fg:%s,fg+:%s,hl:%s,pointer:%s,marker:%s,header:%s",
-					t.Text, t.Text, t.Focus, t.Live, t.Focus, t.Muted)
+				return fmt.Sprintf("%s,fg:%s,fg+:%s,hl:%s,hl+:%s,pointer:%s,marker:%s,prompt:%s,header:%s,info:%s",
+					base, t.Text, t.Text, t.Focus, t.Focus, t.Live, t.Focus, t.Focus, t.Muted, t.Muted)
 			}
-			return fmt.Sprintf("dark,fg:%s,fg+:%s,bg+:%s,hl:%s,pointer:%s,marker:%s,header:%s",
-				t.Text, t.Text, t.Elevated, t.Focus, t.Live, t.Focus, t.Muted)
+			return fmt.Sprintf("%s,fg:%s,fg+:%s,bg:%s,bg+:%s,gutter:%s,border:%s,hl:%s,hl+:%s,pointer:%s,marker:%s,prompt:%s,header:%s,info:%s",
+				base, t.Text, t.Text, t.Background, t.Elevated, t.Background, t.Border,
+				t.Focus, t.Focus, t.Live, t.Focus, t.Focus, t.Muted, t.Muted)
 		}
-		return fmt.Sprintf("dark,fg:%s,fg+:%s,hl:%s,pointer:%s,marker:%s,header:%s",
-			t.Text, t.Text, t.Focus, t.Live, t.Focus, t.Muted)
+		return fmt.Sprintf("%s,fg:%s,fg+:%s,hl:%s,hl+:%s,pointer:%s,marker:%s,prompt:%s,header:%s,info:%s",
+			base, t.Text, t.Text, t.Focus, t.Focus, t.Live, t.Focus, t.Focus, t.Muted, t.Muted)
 	}
 }
 

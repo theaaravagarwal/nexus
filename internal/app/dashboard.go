@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,6 +187,7 @@ type dashboardModel struct {
 	commandQuery       string
 	confirmOpen        bool
 	confirmAction      dashboardSelection
+	confirmOffset      int
 	commandResult      *configuredCommandResult
 	commandRunning     bool
 	commandOffset      int
@@ -832,6 +834,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if !m.commandRunning {
 				if m.commandResult.Action == actionCustom && m.commandResult.Command.Confirm {
 					m.confirmOpen = true
+					m.confirmOffset = 0
 					m.confirmAction = dashboardSelection{
 						Action: actionCustom, Host: m.commandResult.Host, Command: m.commandResult.Command,
 					}
@@ -868,6 +871,18 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.confirmOpen = false
 			m.confirmAction = dashboardSelection{}
+			m.confirmOffset = 0
+		case "k":
+			m.confirmOffset = max(0, m.confirmOffset-1)
+		case "j":
+			width := m.overlayWidth(76)
+			bodyRows := len(m.confirmReviewLines(m.overlayContentWidth(width)))
+			visibleRows := max(1, m.overlayContentHeight()-2)
+			if bodyRows > visibleRows {
+				visibleRows = max(1, visibleRows-1)
+			}
+			maxOffset := max(0, bodyRows-visibleRows)
+			m.confirmOffset = min(maxOffset, m.confirmOffset+1)
 		}
 		return m, nil
 	}
@@ -1055,6 +1070,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.confirmOpen = true
+				m.confirmOffset = 0
 				m.confirmAction = dashboardSelection{
 					Action: actionCopyKey,
 					Host:   m.selectedTarget(),
@@ -1074,6 +1090,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				if command.Command.Confirm {
 					m.confirmOpen = true
+					m.confirmOffset = 0
 					m.confirmAction = selection
 					return m, nil
 				}
@@ -1121,6 +1138,14 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		m.done = true
 		return m, tea.Quit
+	case "tab":
+		if m.workspaceTabsVisible() {
+			m.cycleWorkspace(1)
+		}
+	case "shift+tab":
+		if m.workspaceTabsVisible() {
+			m.cycleWorkspace(-1)
+		}
 	case "h":
 		m.helpOpen = true
 	case "/":
@@ -1175,6 +1200,22 @@ func (m *dashboardModel) openThemePreview() {
 
 func workspaceModes() []string {
 	return []string{"workbench", "console", "fleet"}
+}
+
+func (m dashboardModel) workspaceTabsVisible() bool {
+	return m.width >= 150 && m.height >= 28
+}
+
+func (m *dashboardModel) cycleWorkspace(delta int) {
+	names := workspaceModes()
+	current := 0
+	for index, name := range names {
+		if name == normalizeWorkspaceMode(m.workspace) {
+			current = index
+			break
+		}
+	}
+	m.workspace = names[(current+delta+len(names))%len(names)]
 }
 
 func (m *dashboardModel) openWorkspacePreview() {
@@ -1253,8 +1294,9 @@ func (m dashboardModel) startTerminalAction(selection dashboardSelection, usageC
 	m.commandQuery = ""
 	m.confirmOpen = false
 	m.confirmAction = dashboardSelection{}
+	m.confirmOffset = 0
 	m.terminalRunning = true
-	m.notice = "OpenSSH owns the terminal · password and MFA prompts are handled securely"
+	m.notice = "OpenSSH session active"
 	m.noticeError = false
 	m.startOperation(selection.Action, selectionLabel(selection), selection.Host)
 	operationID := m.operationID
@@ -1277,6 +1319,7 @@ func (m dashboardModel) startSavedCommand(selection dashboardSelection) (tea.Mod
 	m.commandQuery = ""
 	m.confirmOpen = false
 	m.confirmAction = dashboardSelection{}
+	m.confirmOffset = 0
 	m.commandRunning = true
 	m.commandOffset = 0
 	m.commandResult = &configuredCommandResult{
@@ -1609,9 +1652,6 @@ func (m dashboardModel) View() string {
 	if m.width < 30 || m.height < 10 {
 		return m.finishView(m.tinyView())
 	}
-	if m.height < 16 {
-		return m.finishView(m.shortView())
-	}
 	if m.helpOpen {
 		return m.finishView(m.helpView())
 	}
@@ -1635,6 +1675,9 @@ func (m dashboardModel) View() string {
 	}
 	if m.workspaceOpen {
 		return m.finishView(m.workspacePreviewView())
+	}
+	if m.height < 16 {
+		return m.finishView(m.shortView())
 	}
 	s := m.styles()
 	header := m.headerView(s)
@@ -1670,14 +1713,152 @@ func (m dashboardModel) View() string {
 func (m dashboardModel) finishView(view string) string {
 	rendered := fitTerminalView(view, m.width, m.height)
 	if !m.plain && m.theme.Background != "" {
-		rendered = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(m.theme.Text)).
-			Background(lipgloss.Color(m.theme.Background)).
-			Width(m.width).
-			Height(m.height).
-			Render(rendered)
+		lines := strings.Split(rendered, "\n")
+		for len(lines) < m.height {
+			lines = append(lines, "")
+		}
+		for index := range lines {
+			lines[index] = lipgloss.PlaceHorizontal(
+				m.width,
+				lipgloss.Left,
+				lines[index],
+				lipgloss.WithWhitespaceBackground(lipgloss.Color(m.theme.Background)),
+			)
+		}
+		rendered = strings.Join(lines, "\n")
+		rendered = paintTerminalSurface(rendered, m.theme.Text, m.theme.Background)
 	}
 	return rendered
+}
+
+func (m dashboardModel) renderPanel(style lipgloss.Style, content string) string {
+	rendered := style.Render(content)
+	if m.plain || m.theme.Surface == "" {
+		return rendered
+	}
+	return paintTerminalSurface(rendered, m.theme.Text, m.theme.Surface)
+}
+
+func paintTerminalSurface(view, foreground, background string) string {
+	if view == "" || background == "" {
+		return view
+	}
+	backgroundPrefix := terminalStylePrefix(
+		lipgloss.NewStyle().Background(lipgloss.Color(background)),
+	)
+	if backgroundPrefix == "" {
+		return view
+	}
+	foregroundPrefix := ""
+	if foreground != "" {
+		foregroundPrefix = terminalStylePrefix(
+			lipgloss.NewStyle().Foreground(lipgloss.Color(foreground)),
+		)
+	}
+
+	var painted strings.Builder
+	painted.Grow(len(view) + len(view)/4)
+	foregroundSet, backgroundSet := false, false
+	for index := 0; index < len(view); {
+		if view[index] == '\x1b' && index+1 < len(view) && view[index+1] == '[' {
+			end := index + 2
+			for end < len(view) && (view[end] < 0x40 || view[end] > 0x7e) {
+				end++
+			}
+			if end < len(view) {
+				sequence := view[index : end+1]
+				painted.WriteString(sequence)
+				if view[end] == 'm' {
+					updateTerminalColorState(sequence, &foregroundSet, &backgroundSet)
+				}
+				index = end + 1
+				continue
+			}
+		}
+
+		character := view[index]
+		if character == '\n' {
+			painted.WriteByte(character)
+			foregroundSet, backgroundSet = false, false
+			index++
+			continue
+		}
+		if character != '\r' && character != '\t' && character >= 0x20 {
+			if !backgroundSet {
+				painted.WriteString(backgroundPrefix)
+				backgroundSet = true
+			}
+			if !foregroundSet && foregroundPrefix != "" {
+				painted.WriteString(foregroundPrefix)
+				foregroundSet = true
+			}
+		}
+		painted.WriteByte(character)
+		index++
+	}
+	result := painted.String()
+	if !strings.HasSuffix(result, "\x1b[0m") && !strings.HasSuffix(result, "\x1b[m") {
+		painted.WriteString("\x1b[0m")
+		result = painted.String()
+	}
+	return result
+}
+
+func terminalStylePrefix(style lipgloss.Style) string {
+	const marker = "N"
+	sample := style.Render(marker)
+	markerIndex := strings.Index(sample, marker)
+	if markerIndex <= 0 {
+		return ""
+	}
+	return sample[:markerIndex]
+}
+
+func updateTerminalColorState(sequence string, foregroundSet, backgroundSet *bool) {
+	parameters := strings.TrimSuffix(strings.TrimPrefix(sequence, "\x1b["), "m")
+	if parameters == "" {
+		*foregroundSet, *backgroundSet = false, false
+		return
+	}
+	parts := strings.Split(parameters, ";")
+	for index := 0; index < len(parts); index++ {
+		code, err := strconv.Atoi(parts[index])
+		if err != nil {
+			continue
+		}
+		switch {
+		case code == 0:
+			*foregroundSet, *backgroundSet = false, false
+		case code == 39:
+			*foregroundSet = false
+		case code == 49:
+			*backgroundSet = false
+		case code == 38:
+			*foregroundSet = true
+			index += extendedColorParameterCount(parts[index+1:])
+		case code == 48:
+			*backgroundSet = true
+			index += extendedColorParameterCount(parts[index+1:])
+		case code >= 30 && code <= 37 || code >= 90 && code <= 97:
+			*foregroundSet = true
+		case code >= 40 && code <= 47 || code >= 100 && code <= 107:
+			*backgroundSet = true
+		}
+	}
+}
+
+func extendedColorParameterCount(parameters []string) int {
+	if len(parameters) == 0 {
+		return 0
+	}
+	switch parameters[0] {
+	case "2":
+		return min(4, len(parameters))
+	case "5":
+		return min(2, len(parameters))
+	default:
+		return 0
+	}
 }
 
 func (m dashboardModel) ultraWideView(s dashboardStyles, width, height int) string {
@@ -1704,12 +1885,8 @@ func (m dashboardModel) workspaceColumns(s dashboardStyles, width, height int) s
 }
 
 func (m dashboardModel) workbenchWorkspaceView(s dashboardStyles, width, height int) string {
-	topHeight := min(44, max(22, height*3/5))
-	topHeight = min(topHeight, max(18, height-12))
-	if host := m.selectedHost(); len(host.Disks) > 6 {
-		topHeight = min(max(18, height-12), max(topHeight, 24+min(12, len(host.Disks)-6)))
-	}
-	deckHeight := max(10, height-topHeight)
+	deckHeight := min(16, max(9, height/4))
+	topHeight := max(1, height-deckHeight)
 	pulseWidth := max(64, width*3/5)
 	activityWidth := width - pulseWidth
 	top := m.workspaceColumns(s, width, topHeight)
@@ -1723,26 +1900,21 @@ func (m dashboardModel) workbenchWorkspaceView(s dashboardStyles, width, height 
 }
 
 func (m dashboardModel) consoleWorkspaceView(s dashboardStyles, width, height int) string {
-	topHeight := min(24, max(18, height/3))
-	deckHeight := max(10, height-topHeight)
-	outputWidth := max(72, width*2/3)
-	top := m.workspaceColumns(s, width, topHeight)
-	deckBody := lipgloss.JoinHorizontal(lipgloss.Top,
-		fitTerminalView(m.consoleOutputView(s, outputWidth, deckHeight), outputWidth, deckHeight),
-		fitTerminalView(m.activityView(s, width-outputWidth, deckHeight), width-outputWidth, deckHeight),
+	activityHeight := min(14, max(8, height/4))
+	consoleHeight := max(1, height-activityHeight)
+	hostWidth := min(42, max(36, width*24/100))
+	consoleWidth := width - hostWidth
+	console := lipgloss.JoinHorizontal(lipgloss.Top,
+		fitTerminalView(m.hostListView(s, hostWidth, consoleHeight), hostWidth, consoleHeight),
+		fitTerminalView(m.consoleOutputView(s, consoleWidth, consoleHeight), consoleWidth, consoleHeight),
 	)
-	deck := m.frameDeck(deckBody, width, deckHeight)
+	activity := m.frameDeck(m.activityView(s, width, max(1, activityHeight-1)), width, activityHeight)
 	return lipgloss.NewStyle().Width(width).Height(height).
-		Render(lipgloss.JoinVertical(lipgloss.Left, top, deck))
+		Render(lipgloss.JoinVertical(lipgloss.Left, console, activity))
 }
 
 func (m dashboardModel) fleetWorkspaceView(s dashboardStyles, width, height int) string {
-	topHeight := min(22, max(18, height/3))
-	top := m.workspaceColumns(s, width, topHeight)
-	fleetHeight := max(10, height-topHeight)
-	fleet := m.frameDeck(m.fleetDeckView(s, width, fleetHeight), width, fleetHeight)
-	return lipgloss.NewStyle().Width(width).Height(height).
-		Render(lipgloss.JoinVertical(lipgloss.Left, top, fleet))
+	return fitTerminalView(m.fleetDeckView(s, width, height), width, height)
 }
 
 func (m dashboardModel) frameDeck(content string, width, height int) string {
@@ -1786,9 +1958,11 @@ func (m dashboardModel) actionRailView(s dashboardStyles, width, height int) str
 		lines = append(lines, s.muted.Render(fmt.Sprintf("  +%d more", hidden)))
 	}
 	lines = append(lines, "", s.key.Render("[a]")+" "+s.muted.Render("open actions"))
-	return s.panel.BorderTop(false).BorderRight(false).BorderBottom(false).
-		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 1).
-		Render(strings.Join(lines, "\n"))
+	return m.renderPanel(
+		s.panel.BorderTop(false).BorderRight(false).BorderBottom(false).
+			Width(max(1, width-1)).Height(max(1, height)).Padding(1, 1),
+		strings.Join(lines, "\n"),
+	)
 }
 
 func (m dashboardModel) telemetryView(s dashboardStyles, width, height int) string {
@@ -1844,9 +2018,11 @@ func (m dashboardModel) telemetryView(s dashboardStyles, width, height int) stri
 			lines = append(lines, renderDashboardStorageRow(s, disk, max(1, width-6)))
 		}
 	}
-	return s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
-		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
-		Render(strings.Join(lines, "\n"))
+	return m.renderPanel(
+		s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
+			Width(max(1, width)).Height(max(1, height)).Padding(1, 2),
+		strings.Join(lines, "\n"),
+	)
 }
 
 func (m dashboardModel) activityView(s dashboardStyles, width, height int) string {
@@ -1898,9 +2074,11 @@ func (m dashboardModel) activityView(s dashboardStyles, width, height int) strin
 			lines = append(lines, s.text.Render(truncateText(line, max(1, width-5))))
 		}
 	}
-	return s.panel.BorderRight(false).BorderTop(false).BorderBottom(false).
-		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
-		Render(strings.Join(lines, "\n"))
+	return m.renderPanel(
+		s.panel.BorderRight(false).BorderTop(false).BorderBottom(false).
+			Width(max(1, width-1)).Height(max(1, height)).Padding(1, 2),
+		strings.Join(lines, "\n"),
+	)
 }
 
 func (m dashboardModel) consoleOutputView(s dashboardStyles, width, height int) string {
@@ -1929,9 +2107,11 @@ func (m dashboardModel) consoleOutputView(s dashboardStyles, width, height int) 
 			lines = append(lines, s.text.Render(truncateText(line, max(1, width-6))))
 		}
 	}
-	return s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
-		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
-		Render(strings.Join(lines, "\n"))
+	return m.renderPanel(
+		s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
+			Width(max(1, width)).Height(max(1, height)).Padding(1, 2),
+		strings.Join(lines, "\n"),
+	)
 }
 
 func (m dashboardModel) fleetDeckView(s dashboardStyles, width, height int) string {
@@ -1963,9 +2143,11 @@ func (m dashboardModel) fleetDeckView(s dashboardStyles, width, height int) stri
 			break
 		}
 	}
-	return s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
-		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
-		Render(strings.Join(lines, "\n"))
+	return m.renderPanel(
+		s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
+			Width(max(1, width)).Height(max(1, height)).Padding(1, 2),
+		strings.Join(lines, "\n"),
+	)
 }
 
 func diskPercent(disk diskUsage) float64 {
@@ -2124,11 +2306,15 @@ func (m dashboardModel) headerView(s dashboardStyles) string {
 			online++
 		}
 	}
-	status := fmt.Sprintf("%d hosts  ·  %d online", len(m.hosts), online)
+	status := s.muted.Render(fmt.Sprintf("%d hosts", len(m.hosts))) + "  " +
+		s.live.Render(fmt.Sprintf("● %d online", online))
 	if m.probing {
-		status += s.muted.Render(fmt.Sprintf("  ·  probing %d/%d", m.probeComplete, m.probeTotal))
+		status += "  " + s.warning.Render(fmt.Sprintf("◌ probing %d/%d", m.probeComplete, m.probeTotal))
 	}
 	left := s.title.Render("◆ NEXUS") + s.muted.Render("  choose a host")
+	if m.workspaceTabsVisible() {
+		left = s.title.Render("◆ NEXUS") + "  " + m.workspaceTabs(s)
+	}
 	if m.width < 60 {
 		left = s.title.Render("◆ NEXUS")
 		status = fmt.Sprintf("%d saved · %d up", len(m.hosts), online)
@@ -2137,14 +2323,32 @@ func (m dashboardModel) headerView(s dashboardStyles) string {
 		}
 	}
 	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(status)-4)
-	return s.panel.BorderTop(false).BorderLeft(false).BorderRight(false).
-		Width(max(1, m.width-2)).Padding(0, 1).
-		Render(left + strings.Repeat(" ", gap) + status)
+	return m.renderPanel(
+		s.panel.BorderTop(false).BorderLeft(false).BorderRight(false).
+			Width(max(1, m.width-2)).Padding(0, 1),
+		left+strings.Repeat(" ", gap)+status,
+	)
+}
+
+func (m dashboardModel) workspaceTabs(s dashboardStyles) string {
+	active := normalizeWorkspaceMode(m.workspace)
+	tabs := make([]string, 0, len(workspaceModes()))
+	for _, name := range workspaceModes() {
+		label := strings.ToUpper(name)
+		if name == active {
+			tabs = append(tabs, s.key.Render(label))
+			continue
+		}
+		tabs = append(tabs, s.muted.Copy().Padding(0, 1).Render(label))
+	}
+	return strings.Join(tabs, " ")
 }
 
 func (m dashboardModel) hostListView(s dashboardStyles, width, height int) string {
 	titleText := "HOSTS"
-	if width == m.width && m.width < 72 {
+	if m.workspaceTabsVisible() {
+		titleText += " · j/k move"
+	} else if width == m.width && m.width < 72 {
 		titleText += " · j/k move"
 	}
 	title := s.focus.Render(titleText)
@@ -2181,14 +2385,29 @@ func (m dashboardModel) hostListView(s dashboardStyles, width, height int) strin
 			host := m.hosts[m.filtered[position]]
 			lines = append(lines, m.hostRow(s, host, width-4, position == m.cursor))
 		}
-		lines = append(lines, s.muted.Render(fmt.Sprintf("%d–%d / %d", start+1, end, len(m.filtered))))
+		position := fmt.Sprintf("%d–%d / %d", start+1, end, len(m.filtered))
+		if m.query != "" || len(m.filtered) != len(m.hosts) {
+			position = fmt.Sprintf("%d–%d / %d matches · %d saved", start+1, end, len(m.filtered), len(m.hosts))
+		}
+		if start > 0 {
+			position = "↑ " + position
+		}
+		if end < len(m.filtered) {
+			position += " ↓"
+		}
+		lines = append(lines, s.muted.Render(truncateText(position, max(1, width-6))))
 	}
 	content := strings.Join(lines, "\n")
 	panel := s.panel.BorderLeft(false).BorderTop(false).BorderBottom(false)
+	panelWidth := max(1, width-1)
 	if width == m.width {
 		panel = panel.BorderRight(false)
+		panelWidth = max(1, width)
 	}
-	return panel.Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 1).Render(content)
+	return m.renderPanel(
+		panel.Width(panelWidth).Height(max(1, height)).Padding(1, 1),
+		content,
+	)
 }
 
 func (m dashboardModel) hostRow(s dashboardStyles, host dashboardHost, width int, selected bool) string {
@@ -2252,9 +2471,11 @@ func (m dashboardModel) statusText(s dashboardStyles, result reachabilityResult)
 func (m dashboardModel) detailView(s dashboardStyles, width, height int) string {
 	host := m.selectedHost()
 	if host.Target == "" {
-		return s.panel.BorderLeft(false).BorderTop(false).BorderRight(false).BorderBottom(false).
-			Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).
-			Render(s.muted.Render("Select a host to inspect it."))
+		return m.renderPanel(
+			s.panel.BorderLeft(false).BorderTop(false).BorderRight(false).BorderBottom(false).
+				Width(max(1, width)).Height(max(1, height)).Padding(1, 2),
+			s.muted.Render("Select a host to inspect it."),
+		)
 	}
 	name := host.Alias
 	if name == "" {
@@ -2339,8 +2560,11 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 		lines = append(lines, s.muted.Render("[a] choose an action"))
 	}
 	content := strings.Join(lines, "\n")
-	return s.panel.BorderLeft(false).BorderTop(false).BorderRight(false).BorderBottom(false).
-		Width(max(1, width-1)).Height(max(1, height-1)).Padding(1, 2).Render(content)
+	return m.renderPanel(
+		s.panel.BorderLeft(false).BorderTop(false).BorderRight(false).BorderBottom(false).
+			Width(max(1, width)).Height(max(1, height)).Padding(1, 2),
+		content,
+	)
 }
 
 func (m dashboardModel) compactDetailView(s dashboardStyles, width, height int) string {
@@ -2370,8 +2594,11 @@ func (m dashboardModel) compactDetailView(s dashboardStyles, width, height int) 
 		s.text.Render("Storage ") + s.muted.Render(storage),
 	}
 	content := strings.Join(lines, "\n")
-	return s.panel.BorderLeft(false).BorderRight(false).BorderBottom(false).
-		Width(max(1, width-1)).Height(max(1, height-1)).Padding(0, 1).Render(content)
+	return m.renderPanel(
+		s.panel.BorderLeft(false).BorderRight(false).BorderBottom(false).
+			Width(max(1, width)).Height(max(1, height-1)).Padding(0, 1),
+		content,
+	)
 }
 
 func (m dashboardModel) compactView(s dashboardStyles, width, height int) string {
@@ -2379,12 +2606,16 @@ func (m dashboardModel) compactView(s dashboardStyles, width, height int) string
 }
 
 func (m dashboardModel) footerView(s dashboardStyles) string {
-	hints := strings.Join([]string{
+	hintItems := []string{
 		keyHint(s, "enter", "connect"),
 		keyHint(s, "j/k", "move"),
 		keyHint(s, "/", "find"),
 		keyHint(s, "a", "actions"),
-	}, "  ")
+	}
+	if m.workspaceTabsVisible() {
+		hintItems[1] = keyHint(s, "tab", "workspace")
+	}
+	hints := strings.Join(hintItems, "  ")
 	if m.width < 72 {
 		hints = "enter · j/k · / find · a actions · h keys"
 		if m.width < 48 {
@@ -2406,9 +2637,6 @@ func (m dashboardModel) footerView(s dashboardStyles) string {
 			right = s.success.Render("✓ " + truncateText(m.notice, max(18, m.width/2)))
 		}
 	}
-	if right == "" && m.probing && m.width >= 72 {
-		right = fmt.Sprintf("◌ probing %d/%d", m.probeComplete, m.probeTotal)
-	}
 	if right == "" && m.width >= 72 {
 		right = "[h] all keys"
 	}
@@ -2417,24 +2645,118 @@ func (m dashboardModel) footerView(s dashboardStyles) string {
 		if right != "" {
 			content = ansi.Truncate(right, max(1, m.width-4), "…")
 		}
-		return s.panel.BorderBottom(false).BorderLeft(false).BorderRight(false).
-			Width(max(1, m.width-2)).Padding(0, 1).Render(content)
+		return m.renderPanel(
+			s.panel.BorderBottom(false).BorderLeft(false).BorderRight(false).
+				Width(max(1, m.width-2)).Padding(0, 1),
+			content,
+		)
 	}
 	right = ansi.Truncate(right, max(1, m.width-lipgloss.Width(hints)-5), "…")
 	gap := max(1, m.width-lipgloss.Width(hints)-lipgloss.Width(right)-4)
-	return s.panel.BorderBottom(false).BorderLeft(false).BorderRight(false).
-		Width(max(1, m.width-2)).Padding(0, 1).
-		Render(s.muted.Render(hints) + strings.Repeat(" ", gap) + s.focus.Render(right))
+	return m.renderPanel(
+		s.panel.BorderBottom(false).BorderLeft(false).BorderRight(false).
+			Width(max(1, m.width-2)).Padding(0, 1),
+		s.muted.Render(hints)+strings.Repeat(" ", gap)+s.focus.Render(right),
+	)
 }
 
 func keyHint(s dashboardStyles, key, label string) string {
 	return s.key.Render("["+key+"]") + s.muted.Render(" "+label)
 }
 
+func (m dashboardModel) overlayWidth(preferred int) int {
+	return min(preferred, max(20, m.width-2))
+}
+
+func (m dashboardModel) overlayContentHeight() int {
+	// A normal Lip Gloss border and one row of vertical padding consume four rows.
+	return max(1, m.height-4)
+}
+
+func overlayHorizontalPadding(width int) int {
+	if width < 44 {
+		return 1
+	}
+	return 2
+}
+
+func (m dashboardModel) overlayContentWidth(width int) int {
+	return max(1, width-2-(overlayHorizontalPadding(width)*2))
+}
+
+func (m dashboardModel) overlayPanel(s dashboardStyles, width int, lines []string) string {
+	contentHeight := m.overlayContentHeight()
+	contentWidth := m.overlayContentWidth(width)
+	if len(lines) > contentHeight {
+		// Individual overlays reserve their own action footer. Keep that recovery
+		// path visible if an unexpected content state still exceeds the budget.
+		lines = append(lines[:max(0, contentHeight-1)], lines[len(lines)-1])
+	}
+	for index := range lines {
+		lines[index] = ansi.Truncate(lines[index], contentWidth, "…")
+	}
+	panel := m.renderPanel(s.panel.
+		Width(max(1, width-2)).
+		Padding(1, overlayHorizontalPadding(width)), strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+		fitTerminalView(panel, m.width, m.height))
+}
+
+func selectionWindow(total, cursor, limit int) (int, int) {
+	if total <= 0 || limit <= 0 {
+		return 0, 0
+	}
+	limit = min(limit, total)
+	start := max(0, cursor-limit+1)
+	start = min(start, total-limit)
+	return start, start + limit
+}
+
+func wrapTerminalText(value string, width int) []string {
+	if width <= 0 || value == "" {
+		return []string{value}
+	}
+	var lines []string
+	var line strings.Builder
+	for _, r := range value {
+		if r == '\n' {
+			lines = append(lines, line.String())
+			line.Reset()
+			continue
+		}
+		candidate := line.String() + string(r)
+		if line.Len() > 0 && lipgloss.Width(candidate) > width {
+			lines = append(lines, line.String())
+			line.Reset()
+		}
+		line.WriteRune(r)
+	}
+	lines = append(lines, line.String())
+	return lines
+}
+
+func labeledValueLines(label, value string, width int) []string {
+	prefix := label + "  "
+	continuation := strings.Repeat(" ", lipgloss.Width(prefix))
+	valueWidth := max(1, width-lipgloss.Width(prefix))
+	wrapped := wrapTerminalText(value, valueWidth)
+	lines := make([]string, 0, len(wrapped))
+	for index, line := range wrapped {
+		if index == 0 {
+			lines = append(lines, prefix+line)
+		} else {
+			lines = append(lines, continuation+line)
+		}
+	}
+	return lines
+}
+
 func (m dashboardModel) commandPaletteView() string {
 	s := m.styles()
 	commands := m.filteredCommands()
-	width := min(max(38, m.width-12), 74)
+	width := m.overlayWidth(74)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
 	search := "[/] filter actions  ·  [j/k] move"
 	if m.commandFiltering {
 		search = "Filter: " + m.commandQuery + "█"
@@ -2443,22 +2765,47 @@ func (m dashboardModel) commandPaletteView() string {
 	if target := m.selectedTarget(); target != "" {
 		context += "  ·  " + target
 	}
-	lines := []string{s.focus.Render("ACTIONS"), s.muted.Render(truncateText(context, width-6)), s.text.Render(search), ""}
-	start := 0
-	maxRows := max(1, m.height-13)
-	if m.commandCursor >= maxRows {
-		start = m.commandCursor - maxRows + 1
+	lines := []string{
+		s.focus.Render("ACTIONS"),
+		s.muted.Render(truncateText(context, innerWidth)),
+		s.text.Render(truncateText(search, innerWidth)),
 	}
-	end := min(len(commands), start+maxRows)
+	details := []string{}
+	if contentHeight >= 10 && len(commands) > 0 && m.commandCursor < len(commands) {
+		selected := commands[m.commandCursor]
+		switch selected.Action {
+		case actionSSH:
+			details = append(details, s.muted.Render("OpenSSH connection"))
+		case actionCustom:
+			policy := "runs immediately"
+			if selected.Command.Confirm {
+				policy = "asks for confirmation"
+			}
+			details = append(details,
+				s.muted.Render(truncateText(policy+" · "+valueOr(selected.Command.ID, "saved command"), innerWidth)),
+				s.text.Render(truncateText(selected.Command.Command, innerWidth)),
+			)
+		}
+	}
+	footer := "[enter] choose   [esc] close"
+	if m.commandFiltering {
+		footer = "[enter] choose   [backspace] edit   [esc] close"
+	}
+	if innerWidth < 40 {
+		footer = "enter choose · esc close"
+	}
+	footer = truncateText(footer, innerWidth)
+	rowBudget := max(1, contentHeight-len(lines)-len(details)-1)
+	start, end := selectionWindow(len(commands), m.commandCursor, rowBudget)
 	if len(commands) == 0 {
 		lines = append(lines,
-			s.text.Render("No action matches “"+truncateText(m.commandQuery, max(4, width-28))+"”."),
-			s.muted.Render("Backspace to broaden the search."),
+			s.text.Render(truncateText("No action matches “"+m.commandQuery+"”.", innerWidth)),
+			s.muted.Render(truncateText("Backspace to broaden the search.", innerWidth)),
 		)
 	}
 	for i := start; i < end; i++ {
 		command := commands[i]
-		rowWidth := max(12, width-8)
+		rowWidth := max(8, innerWidth-2)
 		labelWidth := min(20, max(8, rowWidth/3))
 		descriptionWidth := max(1, rowWidth-labelWidth-1)
 		description := command.Description
@@ -2486,133 +2833,215 @@ func (m dashboardModel) commandPaletteView() string {
 		}
 		lines = append(lines, line)
 	}
-	if len(commands) > 0 && m.commandCursor < len(commands) {
-		selected := commands[m.commandCursor]
-		switch selected.Action {
-		case actionSSH:
-			lines = append(lines, "", s.muted.Render("OpenSSH prompts securely for password or MFA when needed."))
-		case actionCustom:
-			policy := "runs immediately"
-			if selected.Command.Confirm {
-				policy = "asks for confirmation"
-			}
-			lines = append(lines, "",
-				s.muted.Render(policy+" · "+valueOr(selected.Command.ID, "saved command")),
-				s.text.Render(truncateText(selected.Command.Command, width-6)),
-			)
-		}
-	}
-	footer := "[enter] choose   [esc] close   confirm is opt-in"
-	if m.commandFiltering {
-		footer = "[enter] choose first match   [backspace] edit   [esc] close"
-	}
-	lines = append(lines, "", s.muted.Render(footer))
-	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
+	lines = append(lines, details...)
+	lines = append(lines, s.muted.Render(footer))
+	return m.overlayPanel(s, width, lines)
 }
 
 func (m dashboardModel) themePreviewView() string {
 	s := m.styles()
 	names := themeNames()
-	width := min(max(46, m.width-16), 72)
+	width := m.overlayWidth(84)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
 	lines := []string{
 		s.focus.Render("THEMES"),
-		s.muted.Render("Preview live, then use once or save as your default"),
-		"",
+		s.muted.Render(truncateText(fmt.Sprintf("Preview live · %d palettes", len(names)), innerWidth)),
 	}
-	for index, name := range names {
-		t := resolvedTheme(name)
-		swatch := themeSwatch(t, m.plain)
-		status := ""
-		if name == normalizeThemeName(loadedConfig.UI.Theme) {
-			status = "  default"
-		}
-		line := fmt.Sprintf("%-12s %s%s", name, swatch, status)
-		if index == m.themeCursor {
-			line = s.selected.Render("› " + padCell(line, width-6))
-		} else {
-			line = "  " + line
-		}
-		lines = append(lines, line)
+	footer := "[j/k] preview   [enter] use once   [s] save default   [esc] back"
+	if innerWidth < 44 {
+		footer = "[enter] use  [esc] back"
 	}
-	lines = append(lines,
-		"",
-		s.live.Render("● online")+"  "+s.warning.Render("! refused")+"  "+s.failure.Render("× unavailable")+"  "+s.focus.Render("◆ focus"),
-		"",
-		s.muted.Render("[j/k] preview   [enter] use once   [s] save default"),
-		s.muted.Render("[esc] restore previous theme"),
-	)
+	var stateLine string
 	if m.themeSaving {
-		lines = append(lines, s.live.Render("◌ saving theme…"))
+		stateLine = s.live.Render("◌ saving theme…")
 	} else if m.noticeError && strings.HasPrefix(m.notice, "Theme save failed:") {
-		lines = append(lines, s.failure.Render(truncateText(m.notice, width-6)))
+		stateLine = s.failure.Render(truncateText(m.notice, innerWidth))
 	}
-	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+	reserved := len(lines) + 1
+	if stateLine != "" {
+		reserved++
+	}
+	rowBudget := max(1, contentHeight-reserved)
+	showPosition := len(names) > rowBudget
+	if showPosition {
+		rowBudget = max(1, rowBudget-1)
+	}
+	start, end := selectionWindow(len(names), m.themeCursor, rowBudget)
+	for index := start; index < end; index++ {
+		name := names[index]
+		lines = append(lines, m.themePreviewRow(
+			s,
+			name,
+			index == m.themeCursor,
+			name == normalizeThemeName(loadedConfig.UI.Theme),
+			max(1, innerWidth-2),
+		))
+	}
+	if showPosition {
+		position := fmt.Sprintf("%d–%d / %d", start+1, end, len(names))
+		if start > 0 {
+			position = "↑ more · " + position
+		}
+		if end < len(names) {
+			position += " · more ↓"
+		}
+		lines = append(lines, s.muted.Render(truncateText(position, innerWidth)))
+	}
+	if stateLine != "" {
+		lines = append(lines, stateLine)
+	}
+	lines = append(lines, s.muted.Render(truncateText(footer, innerWidth)))
+	return m.overlayPanel(s, width, lines)
+}
+
+func (m dashboardModel) themePreviewRow(s dashboardStyles, name string, selected, defaultTheme bool, width int) string {
+	if width < 18 {
+		row := "  " + truncateText(name, max(1, width-2))
+		if selected {
+			row = "› " + truncateText(name, max(1, width-2))
+			return s.selected.Render(padCell(row, width))
+		}
+		return s.text.Render(row)
+	}
+
+	t := resolvedTheme(name)
+	nameWidth := min(12, max(4, width-12))
+	if m.plain {
+		marker := "  "
+		if selected {
+			marker = "› "
+		}
+		row := marker + padCell(name, nameWidth) + " " + themeSwatch(t, true, false)
+		remaining := max(0, width-lipgloss.Width(row))
+		if remaining > 1 {
+			detail := themeDescription(name)
+			if defaultTheme {
+				if remaining < 24 {
+					detail = "default"
+				} else {
+					detail += " · default"
+				}
+			}
+			row += "  " + truncateText(detail, remaining-2)
+		}
+		row = padCell(row, width)
+		if selected {
+			return s.selected.Render(row)
+		}
+		return s.text.Render(row)
+	}
+
+	marker := "  "
+	labelStyle, detailStyle := s.text, s.muted
+	if selected {
+		marker = "› "
+		labelStyle, detailStyle = s.selected, s.selectedMuted
+	}
+	left := labelStyle.Render(marker + padCell(name, nameWidth) + " ")
+	swatch := themeSwatch(t, false, selected)
+	remaining := max(0, width-lipgloss.Width(left)-lipgloss.Width(swatch))
+	if remaining == 0 {
+		return left + swatch
+	}
+
+	detail := themeDescription(name)
+	if defaultTheme {
+		if remaining < 24 {
+			detail = "default"
+		} else {
+			detail += " · default"
+		}
+	}
+	if remaining == 1 {
+		return left + swatch + detailStyle.Render(" ")
+	}
+	return left + swatch + detailStyle.Render("  "+padCell(detail, remaining-2))
 }
 
 func (m dashboardModel) workspacePreviewView() string {
 	s := m.styles()
-	width := min(max(48, m.width-16), 76)
+	width := m.overlayWidth(76)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
 	lines := []string{
 		s.focus.Render("WORKSPACE"),
-		s.muted.Render("Choose how large terminals use their available space"),
-		"",
+		s.muted.Render(truncateText("Choose how large terminals use available space", innerWidth)),
 	}
 	descriptions := map[string]string{
 		"workbench": "Host pulse, storage pressure, actions, and activity",
 		"console":   "Give remote output and recent operations more room",
 		"fleet":     "Compare cached facts and freshness across every host",
 	}
-	for index, name := range workspaceModes() {
-		line := fmt.Sprintf("%-12s %s", name, descriptions[name])
+	footer := "[j/k] preview   [enter] use once   [s] save   [esc] back"
+	if innerWidth < 44 {
+		footer = "[enter] use  [esc] back"
+	}
+	var stateLine string
+	if m.workspaceSaving {
+		stateLine = s.live.Render("◌ saving workspace…")
+	} else if m.noticeError && strings.HasPrefix(m.notice, "Workspace save failed:") {
+		stateLine = s.failure.Render(truncateText(m.notice, innerWidth))
+	}
+	reserved := len(lines) + 1
+	if stateLine != "" {
+		reserved++
+	}
+	names := workspaceModes()
+	rowBudget := max(1, contentHeight-reserved)
+	start, end := selectionWindow(len(names), m.workspaceCursor, rowBudget)
+	for index := start; index < end; index++ {
+		name := names[index]
+		line := truncateText(fmt.Sprintf("%-12s %s", name, descriptions[name]), max(1, innerWidth-2))
 		if index == m.workspaceCursor {
-			line = s.selected.Render("› " + padCell(line, width-6))
+			line = s.selected.Render("› " + padCell(line, max(1, innerWidth-2)))
 		} else {
 			line = "  " + s.text.Render(line)
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines,
-		"",
-		s.muted.Render("Compact terminals keep the host-first layout in every mode."),
-		"",
-		s.muted.Render("[j/k] preview   [enter] use once   [s] save default"),
-		s.muted.Render("[esc] restore previous workspace"),
-	)
-	if m.workspaceSaving {
-		lines = append(lines, s.live.Render("◌ saving workspace…"))
-	} else if m.noticeError && strings.HasPrefix(m.notice, "Workspace save failed:") {
-		lines = append(lines, s.failure.Render(truncateText(m.notice, width-6)))
+	if stateLine != "" {
+		lines = append(lines, stateLine)
 	}
-	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+	lines = append(lines, s.muted.Render(truncateText(footer, innerWidth)))
+	return m.overlayPanel(s, width, lines)
 }
 
 func (m dashboardModel) fleetView() string {
 	s := m.styles()
-	width := min(max(42, m.width-16), 78)
+	width := m.overlayWidth(78)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
 	lines := []string{
 		s.focus.Render("FLEET"),
-		s.muted.Render("Saved endpoints · reachability only, never background authentication"),
-		"",
+		s.muted.Render(truncateText("Saved endpoints · connection reachability", innerWidth)),
 	}
-	limit := max(1, m.height-10)
+	footer := "[esc] back · refresh connections from Actions"
+	hostRows := max(1, contentHeight-len(lines)-1)
+	limit := hostRows
+	if len(m.hosts) > hostRows {
+		limit = max(1, hostRows-1)
+	}
 	for index, host := range m.hosts {
 		if index >= limit {
-			lines = append(lines, s.muted.Render(fmt.Sprintf("… and %d more", len(m.hosts)-index)))
 			break
 		}
-		name := padCell(truncateText(displayName(host), 18), 18)
-		target := padCell(truncateText(host.Target, 28), 28)
-		lines = append(lines, "  "+s.text.Render(name)+"  "+s.muted.Render(target)+"  "+m.statusText(s, host.Reachability))
+		status := m.statusText(s, host.Reachability)
+		nameWidth := max(8, innerWidth-lipgloss.Width(status)-2)
+		identity := host.Target
+		if innerWidth >= 48 {
+			identity = displayName(host) + " · " + host.Target
+		}
+		lines = append(lines, s.text.Render(truncateText(identity, nameWidth))+"  "+status)
 	}
 	if len(m.hosts) == 0 {
 		lines = append(lines, s.muted.Render("No saved endpoints yet."))
 	}
-	lines = append(lines, "", s.muted.Render("[esc] back   ·   refresh connections from Actions"))
-	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+	if hidden := len(m.hosts) - min(len(m.hosts), limit); hidden > 0 {
+		lines = append(lines, s.muted.Render(fmt.Sprintf("… and %d more", hidden)))
+	}
+	lines = append(lines, s.muted.Render(truncateText(footer, innerWidth)))
+	return m.overlayPanel(s, width, lines)
 }
 
 func (m dashboardModel) transferView() string {
@@ -2621,7 +3050,9 @@ func (m dashboardModel) transferView() string {
 	if flow == nil {
 		return ""
 	}
-	width := min(max(48, m.width-12), 84)
+	width := m.overlayWidth(84)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
 	title := "PULL · REMOTE SOURCE"
 	subtitle := "Scanning remote paths in the background…"
 	switch flow.Stage {
@@ -2642,45 +3073,42 @@ func (m dashboardModel) transferView() string {
 	}
 	lines := []string{
 		s.focus.Render(title),
-		s.muted.Render(truncateText(flow.Host, width-6)),
-		s.text.Render(subtitle),
-		"",
+		s.muted.Render(truncateText(flow.Host, innerWidth)),
+		s.text.Render(truncateText(subtitle, innerWidth)),
 	}
 	if flow.Err != "" {
 		lines = append(lines,
-			s.failure.Render("Scan failed: "+truncateText(flow.Err, width-12)),
-			s.muted.Render("[r] retry   [esc] cancel"),
+			s.failure.Render(truncateText("Scan failed: "+flow.Err, innerWidth)),
+			s.muted.Render(truncateText("[r] retry   [esc] cancel", innerWidth)),
 		)
 	} else if strings.HasPrefix(string(flow.Stage), "scan-") {
 		lines = append(lines,
-			s.muted.Render("◌ Working without leaving Nexus"),
-			"",
+			s.muted.Render("◌ Scanning paths…"),
 			s.muted.Render("[esc] cancel"),
 		)
 	} else {
-		maxRows := max(1, m.height-11)
-		start := 0
-		if flow.Cursor >= maxRows {
-			start = flow.Cursor - maxRows + 1
+		footer := "[j/k] move   [enter] choose   [esc] cancel"
+		if innerWidth < 40 {
+			footer = "enter · esc cancel"
 		}
-		end := min(len(flow.Items), start+maxRows)
+		maxRows := max(1, contentHeight-len(lines)-1)
+		start, end := selectionWindow(len(flow.Items), flow.Cursor, maxRows)
 		if len(flow.Items) == 0 {
-			lines = append(lines, s.muted.Render("No paths found."), s.muted.Render("[esc] cancel"))
+			lines = append(lines, s.muted.Render("No paths found."))
 		}
 		for index := start; index < end; index++ {
 			label := transferPathLabel(flow.Items[index], flow.Stage)
-			line := truncateText(label, width-8)
+			line := truncateText(label, max(1, innerWidth-2))
 			if index == flow.Cursor {
-				line = s.selected.Render("› " + padCell(line, width-6))
+				line = s.selected.Render("› " + padCell(line, max(1, innerWidth-2)))
 			} else {
 				line = "  " + s.text.Render(line)
 			}
 			lines = append(lines, line)
 		}
-		lines = append(lines, "", s.muted.Render("[j/k] move   [enter] choose   [esc] cancel"))
+		lines = append(lines, s.muted.Render(truncateText(footer, innerWidth)))
 	}
-	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+	return m.overlayPanel(s, width, lines)
 }
 
 func transferPathLabel(item string, stage transferStage) string {
@@ -2704,34 +3132,49 @@ func transferPathLabel(item string, stage transferStage) string {
 	return relative
 }
 
+func (m dashboardModel) confirmReviewLines(width int) []string {
+	selection := m.confirmAction
+	lines := labeledValueLines("Name", valueOr(sanitizeTerminalText(selection.Command.Name), "unnamed"), width)
+	lines = append(lines, labeledValueLines("Target", sanitizeTerminalText(selection.Host), width)...)
+	lines = append(lines, labeledValueLines("Command", selection.Command.Command, width)...)
+	warning := "Runs on the remote host with your SSH access."
+	if selection.Action == actionCopyKey {
+		warning = "Changes authorized_keys and may ask for your password."
+	}
+	lines = append(lines, wrapTerminalText(warning, width)...)
+	return lines
+}
+
 func (m dashboardModel) confirmCommandView() string {
 	s := m.styles()
 	selection := m.confirmAction
-	width := min(max(48, m.width-16), 76)
+	width := m.overlayWidth(76)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
 	title := "CONFIRM SAVED COMMAND"
-	explanation := "Review the exact target and command before Nexus runs it."
-	warning := "This command runs on the remote host with your SSH access."
 	runLabel := "[y] run"
 	if selection.Action == actionCopyKey {
 		title = "CONFIRM COPY SSH KEY"
-		explanation = "Nexus will add your default public key to this host."
-		warning = "This changes the remote authorized_keys file and may ask for your password."
 		runLabel = "[y] continue"
 	}
-	lines := []string{
-		s.warning.Render(title),
-		s.muted.Render(explanation),
-		"",
-		s.text.Render("Name     ") + s.focus.Render(valueOr(selection.Command.Name, "unnamed")),
-		s.text.Render("Target   ") + s.muted.Render(selection.Host),
-		s.text.Render("Command  ") + s.text.Render(selection.Command.Command),
-		"",
-		s.warning.Render(warning),
-		"",
-		s.text.Render(runLabel) + s.muted.Render("   [esc] cancel"),
+	body := m.confirmReviewLines(innerWidth)
+	visibleRows := max(1, contentHeight-2)
+	scrolling := len(body) > visibleRows
+	if scrolling {
+		visibleRows = max(1, visibleRows-1)
 	}
-	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+	maxOffset := max(0, len(body)-visibleRows)
+	offset := min(m.confirmOffset, maxOffset)
+	end := min(len(body), offset+visibleRows)
+	lines := []string{s.warning.Render(truncateText(title, innerWidth))}
+	for _, line := range body[offset:end] {
+		lines = append(lines, s.text.Render(line))
+	}
+	if scrolling {
+		lines = append(lines, s.muted.Render(fmt.Sprintf("j/k review · %d–%d / %d", offset+1, end, len(body))))
+	}
+	lines = append(lines, s.muted.Render(truncateText(runLabel+"   [esc] cancel", innerWidth)))
+	return m.overlayPanel(s, width, lines)
 }
 
 func (m dashboardModel) commandResultView() string {
@@ -2740,16 +3183,16 @@ func (m dashboardModel) commandResultView() string {
 	if result == nil {
 		return ""
 	}
-	width := min(max(48, m.width-12), 88)
+	width := m.overlayWidth(88)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
 	lines := []string{
 		s.focus.Render("COMMAND OUTPUT"),
-		s.text.Render(result.Command.Name) + s.muted.Render("  ·  "+result.Host),
-		"",
+		s.text.Render(truncateText(result.Command.Name+"  ·  "+result.Host, innerWidth)),
 	}
 	if m.commandRunning {
 		lines = append(lines,
-			s.live.Render("◌ Running on the remote host…"),
-			"",
+			s.live.Render(truncateText("◌ Running on the remote host…", innerWidth)),
 			s.muted.Render("[esc] hide output"),
 		)
 	} else {
@@ -2757,61 +3200,77 @@ func (m dashboardModel) commandResultView() string {
 		if result.Err != "" {
 			status = s.failure.Render("× " + result.Err)
 		}
-		lines = append(lines, status, "")
+		lines = append(lines, status)
 		output := result.Output
 		if strings.TrimSpace(output) == "" {
 			output = "(command completed without output)"
 		}
 		outputLines := strings.Split(output, "\n")
-		maxRows := max(1, m.height-10)
+		maxRows := max(1, contentHeight-len(lines)-1)
 		maxOffset := max(0, len(outputLines)-maxRows)
 		offset := min(m.commandOffset, maxOffset)
 		end := min(len(outputLines), offset+maxRows)
 		for _, line := range outputLines[offset:end] {
-			lines = append(lines, s.text.Render(truncateText(line, width-6)))
+			lines = append(lines, s.text.Render(truncateText(line, innerWidth)))
 		}
-		position := ""
+		footer := "[j/k] scroll   [r] run again   [esc] back"
+		if innerWidth < 40 {
+			footer = "r again · esc back"
+		}
 		if len(outputLines) > maxRows {
-			position = fmt.Sprintf("   %d–%d / %d", offset+1, end, len(outputLines))
+			position := fmt.Sprintf(" · %d–%d/%d", offset+1, end, len(outputLines))
+			footer = truncateText(footer, max(1, innerWidth-lipgloss.Width(position))) + position
 		}
-		lines = append(lines, "", s.muted.Render("[j/k] scroll   [r] run again   [esc] back"+position))
+		lines = append(lines, s.muted.Render(truncateText(footer, innerWidth)))
 	}
-	panel := s.panel.Width(width-4).Padding(1, 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fitTerminalView(panel, m.width, m.height))
+	return m.overlayPanel(s, width, lines)
 }
 
-func themeSwatch(t theme, plain bool) string {
+func themeSwatch(t theme, plain, selected bool) string {
 	roles := []string{t.Focus, t.Live, t.Success, t.Warning, t.Error}
 	var blocks []string
+	background := t.Surface
+	if selected {
+		background = t.Elevated
+	}
+	separator := lipgloss.NewStyle()
+	if background != "" {
+		separator = separator.Background(lipgloss.Color(background))
+	} else if selected {
+		separator = separator.Reverse(true)
+	}
 	for _, color := range roles {
 		if plain {
 			blocks = append(blocks, "◆")
 			continue
 		}
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(color))
-		if t.Surface != "" {
-			style = style.Background(lipgloss.Color(t.Surface))
+		if background != "" {
+			style = style.Background(lipgloss.Color(background))
+		} else if selected {
+			style = style.Reverse(true)
 		}
 		blocks = append(blocks, style.Render("◆"))
 	}
-	return strings.Join(blocks, " ")
+	return strings.Join(blocks, separator.Render(" "))
 }
 
 func (m dashboardModel) helpView() string {
 	s := m.styles()
-	if m.height < 22 || m.width < 60 {
+	width := m.overlayWidth(76)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
+	if contentHeight < 19 || innerWidth < 52 {
 		compact := []string{
 			s.focus.Render("NEXUS KEYS"),
-			"",
-			"j/k move        enter connect",
-			"/ find          a actions",
-			"h keys          q quit",
-			"",
-			"lists: j/k move · enter choose",
-			s.muted.Render("esc always goes back"),
+			truncateText("j/k move · enter connect", innerWidth),
+			truncateText("tab workspace on wide screens", innerWidth),
+			truncateText("/ find · a actions", innerWidth),
+			truncateText("h keys · q quit", innerWidth),
+			truncateText("lists: j/k · enter choose", innerWidth),
+			s.muted.Render(truncateText("esc closes this view", innerWidth)),
 		}
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			s.panel.Padding(1, 2).Render(strings.Join(compact, "\n")))
+		return m.overlayPanel(s, width, compact)
 	}
 	help := []string{
 		s.focus.Render("NEXUS KEYS"),
@@ -2819,6 +3278,7 @@ func (m dashboardModel) helpView() string {
 		s.focus.Render("WORKSPACE"),
 		"j / k        move between hosts",
 		"enter        connect with SSH",
+		"tab          cycle workspace tabs on wide screens",
 		"/            find hosts",
 		"a            all actions and saved commands",
 		"h            open this key reference",
@@ -2830,12 +3290,11 @@ func (m dashboardModel) helpView() string {
 		"FAILED SCAN   r retry",
 		"OUTPUT        r run again",
 		"CONFIRM       y run · esc cancel",
-		"SSH AUTH      OpenSSH prompts for password or MFA when no key works",
+		"SSH AUTH      OpenSSH handles interactive prompts",
 		"",
 		"● online   ! refused   × unavailable   ◌ checking",
 	}
-	panel := s.panel.Padding(1, 2).Render(strings.Join(help, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
+	return m.overlayPanel(s, width, help)
 }
 
 func (m dashboardModel) tinyView() string {

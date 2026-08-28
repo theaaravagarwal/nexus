@@ -14,7 +14,7 @@ CLI for SSH sessions and remote file sync workflows.
 - Reachable hosts sort first, with zoxide-style frequency and recency ordering inside each status group.
 - Saved-port reachability and TCP latency without background SSH authentication.
 - Rich responsive workspace with host dossiers, topology, command palette, and contextual help.
-- Seven built-in themes plus semantic color overrides in YAML.
+- Thirteen built-in themes plus semantic color overrides in YAML.
 - Trusted custom commands inherited globally, by tag, or per host, with opt-in confirmation.
 - Install your local SSH key through a confirmed action that respects the saved port.
 - Remote indexing modes:
@@ -57,7 +57,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Choose a different install directory or version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/theaaravagarwal/nexus/main/install.sh | NEXUS_INSTALL_DIR=/usr/local/bin NEXUS_VERSION=v0.1.1 sh
+curl -fsSL https://raw.githubusercontent.com/theaaravagarwal/nexus/main/install.sh | NEXUS_INSTALL_DIR=/usr/local/bin NEXUS_VERSION=v0.1.2 sh
 ```
 
 The installer detects macOS/Linux and ARM64/x86-64, verifies the release checksum, and does not require `sudo` for the default location.
@@ -152,6 +152,7 @@ nexus --port 2200 ssh user@example-host
 |---|---|
 | `j` / `k` | Select a host or move within a list |
 | `enter` | Connect, or choose the selected list item |
+| `tab` / `shift+tab` | Cycle wide-screen Workbench, Console, and Fleet tabs |
 | `/` | Find hosts; inside Actions, filter the action list |
 | `a` | Open every operation and saved command |
 | `h` | Open the complete contextual key reference |
@@ -251,7 +252,8 @@ nexus theme preview   # preview every built-in theme
 Config keys:
 
 - `full_index_depth`: max depth used in `--indexing full` mode.
-- `ui.theme`: `nexus`, `nord`, `dracula`, `catppuccin`, `gruvbox`, `mono`, or `terminal`.
+- `ui.theme`: `nexus`, `nord`, `dracula`, `catppuccin`, `everforest`, `github`,
+  `gruvbox`, `kanagawa`, `mono`, `paper`, `rose-pine`, `tokyo-night`, or `terminal`.
 - `ui.background`: `opaque` or `transparent`.
 - `ui.workspace`: `workbench`, `console`, or `fleet`.
 - `ui.pinned_actions`: ordered built-in IDs or `command:<id>` references.
