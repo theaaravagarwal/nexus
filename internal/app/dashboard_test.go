@@ -232,11 +232,17 @@ func TestDashboardOrdersOnlineHostsFirstAfterProbeBatch(t *testing.T) {
 	}
 }
 
-func TestDashboardConfigIsDiscoverableFromActions(t *testing.T) {
+func TestDashboardSettingsConsolidatesConfigAccess(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
-	model, cmd := chooseDashboardAction(t, model, "config")
+	model, cmd := chooseDashboardAction(t, model, "settings")
+	if cmd != nil || !model.settingsOpen || model.done {
+		t.Fatalf("settings did not stay inside the dashboard: cmd=%v model=%#v", cmd, model)
+	}
+	model.settingsCursor = len(settingsItems()) - 1
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
 	if cmd == nil || !model.done || model.choice.Action != actionConfig {
-		t.Fatalf("saved-command shortcut did not open config: cmd=%v model=%#v", cmd, model)
+		t.Fatalf("configuration row did not open the editor route: cmd=%v model=%#v", cmd, model)
 	}
 }
 
@@ -400,8 +406,6 @@ func TestDashboardUsesOneCanonicalWorkspaceKeyMap(t *testing.T) {
 		{Type: tea.KeyRunes, Runes: []rune{'T'}},
 		{Type: tea.KeyRunes, Runes: []rune{'i'}},
 		{Type: tea.KeyRunes, Runes: []rune{'e'}},
-		{Type: tea.KeyDown},
-		{Type: tea.KeyUp},
 	} {
 		updated, cmd := model.Update(key)
 		model = updated.(dashboardModel)
@@ -412,14 +416,16 @@ func TestDashboardUsesOneCanonicalWorkspaceKeyMap(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"j / k        move between hosts",
+		"↑/↓ or j/k   move between hosts",
 		"tab          cycle workspace tabs on wide screens",
 		"a            all actions and saved commands",
-		"LISTS         j/k move · enter choose · esc back",
+		",            open settings",
+		"LISTS         arrows or j/k move · enter choose · esc back",
 		"THEME         s save default",
 		"OUTPUT        r run again",
 		"CONFIRM       y run · esc cancel",
 	} {
+		model.experimentalTabs = true
 		model.helpOpen = true
 		if !strings.Contains(model.View(), want) {
 			t.Fatalf("key reference missing %q:\n%s", want, model.View())
@@ -430,6 +436,7 @@ func TestDashboardUsesOneCanonicalWorkspaceKeyMap(t *testing.T) {
 func TestDashboardWideWorkspaceTabsCycleWithoutAffectingCompactLayouts(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one", "bob@two"})
 	model.plain = true
+	model.experimentalTabs = true
 	model.width, model.height = 150, 32
 
 	for _, label := range []string{"WORKBENCH", "CONSOLE", "FLEET"} {
@@ -475,6 +482,65 @@ func TestDashboardWideWorkspaceTabsCycleWithoutAffectingCompactLayouts(t *testin
 	}
 }
 
+func TestDashboardWorkspaceTabsAreOptIn(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.width, model.height = 180, 40
+	before := model.workspace
+	view := model.View()
+	if strings.Contains(view, "CONSOLE") || strings.Contains(view, "[tab] workspace") {
+		t.Fatalf("experimental tabs appeared while disabled:\n%s", view)
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(dashboardModel)
+	if model.workspace != before {
+		t.Fatalf("disabled tab key changed workspace from %q to %q", before, model.workspace)
+	}
+}
+
+func TestDashboardWorkspaceTabsSupportHorizontalArrowsWhenVisible(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalTabs = true
+	model.width, model.height = 180, 40
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(dashboardModel)
+	if model.workspace != "console" {
+		t.Fatalf("right arrow workspace=%q, want console", model.workspace)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	model = updated.(dashboardModel)
+	if model.workspace != "workbench" {
+		t.Fatalf("left arrow workspace=%q, want workbench", model.workspace)
+	}
+
+	model.width = 149
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(dashboardModel)
+	if model.workspace != "workbench" {
+		t.Fatalf("hidden tabs changed workspace to %q", model.workspace)
+	}
+}
+
+func TestDashboardHelpHidesExperimentalTabKeysByDefault(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.helpOpen = true
+	view := model.View()
+	if strings.Contains(view, "workspace tabs") || strings.Contains(view, "tab workspace") {
+		t.Fatalf("disabled experimental controls appeared in help:\n%s", view)
+	}
+}
+
+func TestDashboardArrowKeysMirrorVimMovement(t *testing.T) {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyDown}, {Type: tea.KeyRunes, Runes: []rune{'j'}}} {
+		model := newDashboardModel([]string{"alice@one", "bob@two"})
+		updated, _ := model.Update(key)
+		if got := updated.(dashboardModel).cursor; got != 1 {
+			t.Fatalf("key=%q cursor=%d, want 1", key.String(), got)
+		}
+	}
+}
+
 func TestDashboardActionListExposesEveryOperation(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	actions := map[dashboardAction]bool{}
@@ -483,11 +549,27 @@ func TestDashboardActionListExposesEveryOperation(t *testing.T) {
 	}
 	for _, action := range []dashboardAction{
 		actionSSH, actionPull, actionPush, actionInfo, actionProbe, actionProbeAll,
-		actionTop, actionNet, actionStorage, actionCopyKey, actionFleet, actionThemes, actionConfig,
+		actionTop, actionNet, actionStorage, actionCopyKey, actionFleet, actionSettings,
 	} {
 		if !actions[action] {
 			t.Fatalf("action %q is not discoverable from Actions", action)
 		}
+	}
+}
+
+func TestDashboardActionListConsolidatesUIControlsIntoSettings(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	settings := 0
+	for _, command := range model.availableCommands() {
+		switch command.Action {
+		case actionSettings:
+			settings++
+		case actionThemes, actionWorkspace, actionConfig:
+			t.Fatalf("legacy UI action %q remains visible: %#v", command.Action, command)
+		}
+	}
+	if settings != 1 {
+		t.Fatalf("settings actions=%d, want exactly one", settings)
 	}
 }
 
@@ -599,11 +681,16 @@ func TestDashboardInteractiveSavedCommandTemporarilyOwnsTerminal(t *testing.T) {
 func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model, cmd := chooseDashboardAction(t, model, "theme")
+	if cmd != nil || !model.settingsOpen {
+		t.Fatalf("theme search did not open settings: cmd=%v model=%#v", cmd, model)
+	}
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
 	if cmd != nil || !model.themeOpen {
-		t.Fatalf("theme preview did not open in TUI: cmd=%v model=%#v", cmd, model)
+		t.Fatalf("theme row did not open preview in TUI: cmd=%v model=%#v", cmd, model)
 	}
 	before := model.theme.Name
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	model = updated.(dashboardModel)
 	if model.theme.Name == before {
 		t.Fatal("theme preview did not advance")
@@ -613,6 +700,21 @@ func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("theme preview missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestDashboardNestedThemePickerReturnsToSettings(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.settingsOpen = true
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if !model.themeOpen || !model.settingsOpen {
+		t.Fatalf("theme picker did not retain settings parent: %#v", model)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(dashboardModel)
+	if model.themeOpen || !model.settingsOpen || !strings.Contains(model.View(), "SETTINGS") {
+		t.Fatalf("theme picker did not return to settings: %#v\n%s", model, model.View())
 	}
 }
 
@@ -638,7 +740,7 @@ func TestDashboardSelectedThemeRowDoesNotExposeANSIFragments(t *testing.T) {
 			t.Fatalf("selected theme row exposed ANSI fragment %q:\n%s", fragment, plain)
 		}
 	}
-	for _, want := range []string{"› nexus", "violet signal", "default", "13 palettes", "more ↓"} {
+	for _, want := range []string{"› nexus", "violet signal", "default", "20 palettes", "more ↓"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("theme preview missing %q:\n%s", want, plain)
 		}
@@ -657,10 +759,15 @@ func TestDashboardThemeShortcutSavesDefaultInsideTUI(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.configPath = configPath
 	model, cmd := chooseDashboardAction(t, model, "theme")
-	if cmd != nil || !model.themeOpen {
-		t.Fatalf("theme action did not open themes: cmd=%v model=%#v", cmd, model)
+	if cmd != nil || !model.settingsOpen {
+		t.Fatalf("theme action did not open settings: cmd=%v model=%#v", cmd, model)
 	}
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if !model.themeOpen {
+		t.Fatal("theme settings row did not open the picker")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	model = updated.(dashboardModel)
 	selected := model.theme.Name
 	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
@@ -681,6 +788,62 @@ func TestDashboardThemeShortcutSavesDefaultInsideTUI(t *testing.T) {
 	}
 	if cfg.UI.Theme != selected {
 		t.Fatalf("saved theme=%q want=%q", cfg.UI.Theme, selected)
+	}
+}
+
+func TestDashboardSettingsPersistExperimentalTabsInsideTUI(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(defaultConfigYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := newDashboardModel([]string{"alice@one"})
+	model.configPath = configPath
+	model.settingsOpen = true
+	model.settingsCursor = 2
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.settingsSaving || model.experimentalTabs {
+		t.Fatalf("experimental tab save did not start cleanly: cmd=%v model=%#v", cmd, model)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(dashboardModel)
+	if model.settingsSaving || !model.settingsOpen || !model.experimentalTabs ||
+		!loadedConfig.UI.ExperimentalTabs || model.noticeError {
+		t.Fatalf("experimental tabs were not saved in context: %#v", model)
+	}
+	cfg, err := loadAppConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.UI.ExperimentalTabs {
+		t.Fatal("experimental tab setting was not persisted")
+	}
+}
+
+func TestDashboardSettingsSaveFailureKeepsCurrentValueAndContext(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.configPath = ""
+	model.settingsOpen = true
+	model.settingsCursor = 2
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.settingsSaving {
+		t.Fatalf("setting save did not start: cmd=%v model=%#v", cmd, model)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(dashboardModel)
+	if model.settingsSaving || !model.settingsOpen || model.experimentalTabs ||
+		loadedConfig.UI.ExperimentalTabs || !model.noticeError ||
+		!strings.Contains(model.View(), "Setting save failed:") {
+		t.Fatalf("failed setting save changed state or lost context: %#v\n%s", model, model.View())
 	}
 }
 
@@ -908,6 +1071,28 @@ func TestDashboardPinnedActionsLeadInConfiguredOrder(t *testing.T) {
 	}
 }
 
+func TestDashboardLegacyUIPinsResolveToOneSettingsAction(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+	loadedConfig.UI.PinnedActions = []string{"themes", "workspace", "config", "storage"}
+
+	model := newDashboardModel([]string{"alice@one"})
+	commands := model.availableCommands()
+	if len(commands) < 2 || commands[0].Action != actionSettings || commands[1].Action != actionStorage {
+		t.Fatalf("legacy UI pins were not normalized: %#v", commands[:min(3, len(commands))])
+	}
+	settings := 0
+	for _, command := range commands {
+		if command.Action == actionSettings {
+			settings++
+		}
+	}
+	if settings != 1 {
+		t.Fatalf("settings actions=%d, want exactly one", settings)
+	}
+}
+
 func TestDashboardActivitiesCapAtFiveAndPreserveOutputLines(t *testing.T) {
 	var events []activityEvent
 	for index := 0; index < 7; index++ {
@@ -1047,7 +1232,7 @@ func TestRenderStorageInventoryIsDeviceFirstFilteredAndANSIPlain(t *testing.T) {
 
 func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 	for _, size := range [][2]int{{40, 16}, {72, 20}, {120, 32}} {
-		for _, overlay := range []string{"help", "commands", "themes", "workspace", "confirm", "output", "fleet", "transfer"} {
+		for _, overlay := range []string{"help", "commands", "themes", "workspace", "settings", "confirm", "output", "fleet", "transfer"} {
 			model := newDashboardModel([]string{"alice@one"})
 			model.width, model.height = size[0], size[1]
 			switch overlay {
@@ -1059,6 +1244,8 @@ func TestDashboardOverlaysStayWithinTerminalBounds(t *testing.T) {
 				model.openThemePreview()
 			case "workspace":
 				model.openWorkspacePreview()
+			case "settings":
+				model.settingsOpen = true
 			case "confirm":
 				model.confirmOpen = true
 				model.confirmAction = dashboardSelection{
@@ -1096,6 +1283,7 @@ func TestDashboardCompactOverlaysKeepContextAndRecoveryVisible(t *testing.T) {
 		{"actions", func(model *dashboardModel) { model.commandOpen = true }, []string{"ACTIONS", "enter choose", "esc close"}},
 		{"themes", func(model *dashboardModel) { model.openThemePreview() }, []string{"THEMES", "enter] use", "esc] back"}},
 		{"workspace", func(model *dashboardModel) { model.openWorkspacePreview() }, []string{"WORKSPACE", "enter] use", "esc] back"}},
+		{"settings", func(model *dashboardModel) { model.settingsOpen = true }, []string{"SETTINGS", "Theme", "esc back"}},
 		{"fleet", func(model *dashboardModel) { model.showTopology = true }, []string{"FLEET", "alice@one", "[esc] back"}},
 		{"transfer", func(model *dashboardModel) {
 			model.transfer = &transferFlow{
@@ -1201,6 +1389,7 @@ func TestDashboardHeaderHierarchyStaysResponsiveAtBreakpoints(t *testing.T) {
 	for _, width := range []int{59, 60, 71, 72, 95, 96, 149, 150} {
 		model := newDashboardModel([]string{"alice@one", "bob@two"})
 		model.plain = true
+		model.experimentalTabs = true
 		model.width, model.height = width, 32
 		view := model.View()
 		assertTerminalBounds(t, view, width, model.height, "header breakpoint")

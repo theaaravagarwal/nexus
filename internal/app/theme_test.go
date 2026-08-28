@@ -10,8 +10,9 @@ import (
 
 func TestBuiltInThemeLibraryAndDescriptions(t *testing.T) {
 	want := []string{
-		"catppuccin", "dracula", "everforest", "github", "gruvbox", "kanagawa", "mono",
-		"nexus", "nord", "paper", "rose-pine", "terminal", "tokyo-night",
+		"amber", "ayu-mirage", "catppuccin", "dracula", "everforest", "github", "gruvbox",
+		"iceberg", "kanagawa", "mono", "nexus", "nord", "paper", "rose-pine",
+		"solarized-dark", "solarized-light", "synthwave", "terminal", "tokyo-night", "vesper",
 	}
 	if got := themeNames(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("theme names=%v want=%v", got, want)
@@ -38,7 +39,7 @@ func TestThemeListIncludesPaletteDescriptions(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"nexus         violet signal", "paper         bright violet", "tokyo-night   electric midnight"} {
+	for _, want := range []string{"nexus            violet signal", "paper            bright violet", "solarized-light  balanced daylight"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("theme list missing %q:\n%s", want, output.String())
 		}

@@ -28,7 +28,7 @@ host_profiles:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.UI.Theme != "nexus" || cfg.FullIndexDepth != 7 {
+	if cfg.UI.Theme != "nexus" || cfg.UI.ExperimentalTabs || cfg.FullIndexDepth != 7 {
 		t.Fatalf("unexpected defaults: %#v", cfg)
 	}
 	if cfg.FZF.Theme != "cyberpunk" {
@@ -237,10 +237,42 @@ ui:
 	}
 }
 
+func TestSaveExperimentalTabsUsesTypedBoolAndPreservesConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `# keep settings note
+ui:
+  theme: nord
+  background: opaque
+  workspace: workbench
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveExperimentalTabsToConfig(path, true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.UI.ExperimentalTabs || cfg.UI.Theme != "nord" || cfg.UI.Workspace != "workbench" {
+		t.Fatalf("config changed unexpectedly: %#v", cfg.UI)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "# keep settings note") ||
+		!strings.Contains(string(saved), "experimental_tabs: true") ||
+		strings.Contains(string(saved), `experimental_tabs: "true"`) {
+		t.Fatalf("experimental flag was not saved as a bool with comments intact:\n%s", saved)
+	}
+}
+
 func TestDefaultConfigIncludesSavedCommandExamples(t *testing.T) {
 	config := defaultConfigYAML()
 	for _, want := range []string{
-		"choose Themes", "workspace: workbench", "pinned_actions:", "add: command:tmux",
+		"choose Settings", "workspace: workbench", "experimental_tabs: false", "pinned_actions:", "add: command:tmux",
 		"id: disk-usage", "disk usage", "journalctl -u app", "confirm: true", "exact user@host:port",
 	} {
 		if !strings.Contains(config, want) {

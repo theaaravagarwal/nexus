@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -22,11 +23,12 @@ type commandConfig struct {
 }
 
 type uiConfig struct {
-	Theme         string            `yaml:"theme"`
-	Background    string            `yaml:"background"`
-	Workspace     string            `yaml:"workspace,omitempty"`
-	PinnedActions []string          `yaml:"pinned_actions,omitempty"`
-	Colors        map[string]string `yaml:"colors,omitempty"`
+	Theme            string            `yaml:"theme"`
+	Background       string            `yaml:"background"`
+	Workspace        string            `yaml:"workspace,omitempty"`
+	ExperimentalTabs bool              `yaml:"experimental_tabs,omitempty"`
+	PinnedActions    []string          `yaml:"pinned_actions,omitempty"`
+	Colors           map[string]string `yaml:"colors,omitempty"`
 }
 
 type reachabilityConfig struct {
@@ -107,17 +109,19 @@ func ensureConfigFile(configPath string) error {
 func defaultConfigYAML() string {
 	return `# Nexus settings
 # Open this file with: nexus config
-# In the TUI, press a and choose Themes.
+# In the TUI, press comma or choose Settings from Actions.
 
 full_index_depth: 5
 
 ui:
-  # nexus | nord | dracula | catppuccin | gruvbox | mono | terminal
+  # Run nexus theme list for every built-in palette.
   theme: nexus
   # opaque paints the theme background; transparent uses your terminal background.
   background: opaque
   # workbench | console | fleet
   workspace: workbench
+  # Prototype: show keyboard-switchable workspace tabs on wide terminals.
+  experimental_tabs: false
   # Stable built-in IDs or command:<id>. Pins stay in this exact order.
   pinned_actions:
     - ssh
@@ -260,7 +264,23 @@ func saveWorkspaceToConfig(configPath, name string) error {
 	return saveUIValue(configPath, "workspace", name)
 }
 
+func saveBackgroundToConfig(configPath, background string) error {
+	background = strings.ToLower(strings.TrimSpace(background))
+	if background != "opaque" && background != "transparent" {
+		return fmt.Errorf("unknown UI background %q", background)
+	}
+	return saveUIValue(configPath, "background", background)
+}
+
+func saveExperimentalTabsToConfig(configPath string, enabled bool) error {
+	return saveUIScalar(configPath, "experimental_tabs", "!!bool", strconv.FormatBool(enabled))
+}
+
 func saveUIValue(configPath, key, value string) error {
+	return saveUIScalar(configPath, key, "!!str", value)
+}
+
+func saveUIScalar(configPath, key, tag, value string) error {
 	if configPath == "" {
 		return errors.New("config path is empty")
 	}
@@ -299,7 +319,7 @@ func saveUIValue(configPath, key, value string) error {
 		valueNode = ui.Content[len(ui.Content)-1]
 	}
 	valueNode.Kind = yaml.ScalarNode
-	valueNode.Tag = "!!str"
+	valueNode.Tag = tag
 	valueNode.Value = value
 
 	var output bytes.Buffer
@@ -312,7 +332,7 @@ func saveUIValue(configPath, key, value string) error {
 		return fmt.Errorf("failed to finish config YAML: %w", err)
 	}
 	if err := atomicWritePrivate(configPath, output.Bytes()); err != nil {
-		return fmt.Errorf("failed to save theme: %w", err)
+		return fmt.Errorf("failed to save UI setting: %w", err)
 	}
 	return nil
 }
@@ -519,7 +539,7 @@ func unresolvedPinnedActions(cfg appConfig) []string {
 	known := map[string]struct{}{
 		"ssh": {}, "pull": {}, "push": {}, "top": {}, "net": {}, "info": {},
 		"storage": {}, "copy-key": {}, "config": {}, "fleet": {}, "themes": {},
-		"workspace": {}, "probe": {}, "probe-all": {},
+		"workspace": {}, "settings": {}, "probe": {}, "probe-all": {},
 	}
 	addCommands := func(commands []commandConfig) {
 		for _, command := range commands {

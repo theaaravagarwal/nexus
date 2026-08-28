@@ -14,7 +14,7 @@ CLI for SSH sessions and remote file sync workflows.
 - Reachable hosts sort first, with zoxide-style frequency and recency ordering inside each status group.
 - Saved-port reachability and TCP latency without background SSH authentication.
 - Rich responsive workspace with host dossiers, topology, command palette, and contextual help.
-- Thirteen built-in themes plus semantic color overrides in YAML.
+- Twenty built-in themes plus semantic color overrides in YAML.
 - Trusted custom commands inherited globally, by tag, or per host, with opt-in confirmation.
 - Install your local SSH key through a confirmed action that respects the saved port.
 - Remote indexing modes:
@@ -150,18 +150,19 @@ nexus --port 2200 ssh user@example-host
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Select a host or move within a list |
+| `↑` / `↓` or `j` / `k` | Select a host or move within a list |
 | `enter` | Connect, or choose the selected list item |
-| `tab` / `shift+tab` | Cycle wide-screen Workbench, Console, and Fleet tabs |
+| `tab` / `shift+tab` | Cycle wide-screen workspace tabs when the experimental option is enabled |
 | `/` | Find hosts; inside Actions, filter the action list |
 | `a` | Open every operation and saved command |
+| `,` | Open Settings |
 | `h` | Open the complete contextual key reference |
 | `esc` | Go back or cancel the current context |
 | `q` | Quit from the workspace |
 
 The Actions list contains pull, push, SSH key installation, selected/all
 connection checks, background system refresh, system/network/storage tools,
-fleet, themes, configuration, and saved commands. Storage inventories and
+fleet, Settings, and saved commands. Storage inventories and
 ordinary saved-command output stay in a scrollable Nexus result view.
 Interactive SSH temporarily hands the terminal to OpenSSH, so native key,
 password, keyboard-interactive, host-key, and MFA prompts work securely before
@@ -180,12 +181,14 @@ Default config template:
 full_index_depth: 5
 
 ui:
-  # nexus | nord | dracula | catppuccin | gruvbox | mono | terminal
+  # Run nexus theme list for every built-in palette.
   theme: nexus
   # opaque paints the theme background; transparent preserves your terminal.
   background: opaque
   # workbench | console | fleet
   workspace: workbench
+  # Prototype tabs appear only on terminals at least 150 columns wide.
+  experimental_tabs: false
   pinned_actions: [ssh, info, storage]
 
 reachability:
@@ -231,10 +234,10 @@ How to use the config:
 3. Under `host_profiles`, use the full saved target when profiles differ by user or port.
 4. Save and return to Nexus; aliases, tags, and commands reload automatically.
 
-For themes, press `a`, choose **Themes**, move with `j/k`, then press
-`enter` to use one for the current session or `s` to save it as the default.
-Choose **Workspace** the same way to preview or save Workbench, Console, or
-Fleet. `ui.pinned_actions` accepts stable built-in IDs and `command:<id>`;
+Press `,` or choose **Settings** from Actions to manage themes, background,
+the default workspace, and the optional workspace-tab prototype. Theme and
+workspace pickers support arrows or `j/k`; press `enter` to use one for the
+session or `s` to save it as the default. `ui.pinned_actions` accepts stable built-in IDs and `command:<id>`;
 configured pins lead in exact order, followed by frequency-ranked actions.
 Hosts are grouped with reachable machines first, then ordered by frequency and
 recency within each group. Probe completion preserves the selected target and
@@ -252,10 +255,10 @@ nexus theme preview   # preview every built-in theme
 Config keys:
 
 - `full_index_depth`: max depth used in `--indexing full` mode.
-- `ui.theme`: `nexus`, `nord`, `dracula`, `catppuccin`, `everforest`, `github`,
-  `gruvbox`, `kanagawa`, `mono`, `paper`, `rose-pine`, `tokyo-night`, or `terminal`.
+- `ui.theme`: run `nexus theme list` for the twenty built-in palettes.
 - `ui.background`: `opaque` or `transparent`.
 - `ui.workspace`: `workbench`, `console`, or `fleet`.
+- `ui.experimental_tabs`: shows the prototype workspace tab strip on wide terminals.
 - `ui.pinned_actions`: ordered built-in IDs or `command:<id>` references.
 - `ui.colors`: optional semantic overrides such as `focus` and `live`.
 - `reachability.*`: bounds saved-target DNS/TCP checks; these are not SSH/login latency checks.

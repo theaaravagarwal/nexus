@@ -26,35 +26,49 @@ type theme struct {
 }
 
 var themes = map[string]theme{
-	"nexus":       {"nexus", "#0B0A12", "#13111C", "#1B1728", "#F4F1FF", "#A29AB8", "#A78BFA", "#5EEAD4", "#6EE7B7", "#FBBF24", "#FB7185", "#423A56"},
-	"nord":        {"nord", "#2E3440", "#3B4252", "#434C5E", "#ECEFF4", "#BAC3D2", "#C3A6BE", "#88C0D0", "#A3BE8C", "#EBCB8B", "#F2A2AB", "#4C566A"},
-	"dracula":     {"dracula", "#282A36", "#343746", "#44475A", "#F8F8F2", "#B8B8C7", "#BD93F9", "#8BE9FD", "#50FA7B", "#F1FA8C", "#FF7B7B", "#6272A4"},
-	"catppuccin":  {"catppuccin", "#1E1E2E", "#242438", "#313244", "#CDD6F4", "#A6ADC8", "#CBA6F7", "#89DCEB", "#A6E3A1", "#F9E2AF", "#F38BA8", "#585B70"},
-	"everforest":  {"everforest", "#2D353B", "#343F44", "#3D484D", "#D3C6AA", "#B3BCB4", "#D699B6", "#83C092", "#A7C080", "#DBBC7F", "#F09A9C", "#4F585E"},
-	"github":      {"github", "#0D1117", "#161B22", "#21262D", "#F0F6FC", "#A8B3C2", "#D2A8FF", "#79C0FF", "#7EE787", "#E3B341", "#FF7B72", "#30363D"},
-	"gruvbox":     {"gruvbox", "#282828", "#32302F", "#3C3836", "#EBDBB2", "#BDAE93", "#D3869B", "#83A598", "#B8BB26", "#FABD2F", "#FF7665", "#665C54"},
-	"kanagawa":    {"kanagawa", "#1F1F28", "#2A2A37", "#363646", "#DCD7BA", "#9CABCA", "#D27E99", "#7FB4CA", "#98BB6C", "#E6C384", "#FF5D62", "#54546D"},
-	"mono":        {"mono", "#101010", "#181818", "#242424", "#F2F2F2", "#B3B3B3", "#FFFFFF", "#D8D8D8", "#FFFFFF", "#C6C6C6", "#9C9C9C", "#555555"},
-	"paper":       {"paper", "#F5F3FF", "#FFFFFF", "#EDE9FE", "#211A35", "#625B71", "#6D28D9", "#0F766E", "#15803D", "#8A5D00", "#BE123C", "#CBC3DC"},
-	"rose-pine":   {"rose-pine", "#191724", "#1F1D2E", "#26233A", "#E0DEF4", "#908CAA", "#C4A7E7", "#9CCFD8", "#56949F", "#F6C177", "#EB6F92", "#403D52"},
-	"terminal":    {"terminal", "", "", "", "252", "244", "141", "81", "42", "214", "203", "240"},
-	"tokyo-night": {"tokyo-night", "#1A1B26", "#24283B", "#414868", "#C0CAF5", "#B4BDE3", "#BB9AF7", "#7DCFFF", "#9ECE6A", "#E0AF68", "#F7768E", "#3B4261"},
+	"amber":           {"amber", "#140F08", "#20180E", "#2C2113", "#FFF3D6", "#D0B987", "#FFB454", "#6FE7C8", "#A8D96B", "#FFD166", "#FF7B72", "#5D4527"},
+	"ayu-mirage":      {"ayu-mirage", "#171B24", "#1F2430", "#2A3140", "#F3F4F5", "#B8C0CC", "#FFD580", "#73D0FF", "#BAE67E", "#FFD580", "#FF7A90", "#455064"},
+	"nexus":           {"nexus", "#0B0A12", "#13111C", "#1B1728", "#F4F1FF", "#A29AB8", "#A78BFA", "#5EEAD4", "#6EE7B7", "#FBBF24", "#FB7185", "#423A56"},
+	"nord":            {"nord", "#2E3440", "#3B4252", "#434C5E", "#ECEFF4", "#BAC3D2", "#C3A6BE", "#88C0D0", "#A3BE8C", "#EBCB8B", "#F2A2AB", "#4C566A"},
+	"dracula":         {"dracula", "#282A36", "#343746", "#44475A", "#F8F8F2", "#B8B8C7", "#BD93F9", "#8BE9FD", "#50FA7B", "#F1FA8C", "#FF7B7B", "#6272A4"},
+	"catppuccin":      {"catppuccin", "#1E1E2E", "#242438", "#313244", "#CDD6F4", "#A6ADC8", "#CBA6F7", "#89DCEB", "#A6E3A1", "#F9E2AF", "#F38BA8", "#585B70"},
+	"everforest":      {"everforest", "#2D353B", "#343F44", "#3D484D", "#D3C6AA", "#B3BCB4", "#D699B6", "#83C092", "#A7C080", "#DBBC7F", "#F09A9C", "#4F585E"},
+	"github":          {"github", "#0D1117", "#161B22", "#21262D", "#F0F6FC", "#A8B3C2", "#D2A8FF", "#79C0FF", "#7EE787", "#E3B341", "#FF7B72", "#30363D"},
+	"gruvbox":         {"gruvbox", "#282828", "#32302F", "#3C3836", "#EBDBB2", "#BDAE93", "#D3869B", "#83A598", "#B8BB26", "#FABD2F", "#FF7665", "#665C54"},
+	"iceberg":         {"iceberg", "#161821", "#1E2132", "#2A2F44", "#E8E9EC", "#B4BECA", "#A7C1E8", "#89DCEB", "#B4D88A", "#EBCB8B", "#F28B8B", "#3C435E"},
+	"kanagawa":        {"kanagawa", "#1F1F28", "#2A2A37", "#363646", "#DCD7BA", "#9CABCA", "#D27E99", "#7FB4CA", "#98BB6C", "#E6C384", "#FF5D62", "#54546D"},
+	"mono":            {"mono", "#101010", "#181818", "#242424", "#F2F2F2", "#B3B3B3", "#FFFFFF", "#D8D8D8", "#FFFFFF", "#C6C6C6", "#9C9C9C", "#555555"},
+	"paper":           {"paper", "#F5F3FF", "#FFFFFF", "#EDE9FE", "#211A35", "#625B71", "#6D28D9", "#0F766E", "#15803D", "#8A5D00", "#BE123C", "#CBC3DC"},
+	"rose-pine":       {"rose-pine", "#191724", "#1F1D2E", "#26233A", "#E0DEF4", "#908CAA", "#C4A7E7", "#9CCFD8", "#56949F", "#F6C177", "#EB6F92", "#403D52"},
+	"solarized-dark":  {"solarized-dark", "#002B36", "#073642", "#124652", "#FDF6E3", "#B8C4C1", "#E6B5FF", "#67D4E7", "#A8D47A", "#FFD166", "#FF7B88", "#41636B"},
+	"solarized-light": {"solarized-light", "#FDF6E3", "#FFFDF4", "#EEE8D5", "#173B45", "#4C6570", "#6C3D99", "#006D78", "#2B6E2E", "#7A5900", "#A61B31", "#D6CDB6"},
+	"synthwave":       {"synthwave", "#120A1F", "#1C1230", "#2A1942", "#FFF4FF", "#C8B5D8", "#FF7EDB", "#66F6FF", "#9BEE9F", "#FFE66D", "#FF7795", "#5E3A73"},
+	"terminal":        {"terminal", "", "", "", "252", "244", "141", "81", "42", "214", "203", "240"},
+	"tokyo-night":     {"tokyo-night", "#1A1B26", "#24283B", "#414868", "#C0CAF5", "#B4BDE3", "#BB9AF7", "#7DCFFF", "#9ECE6A", "#E0AF68", "#F7768E", "#3B4261"},
+	"vesper":          {"vesper", "#101010", "#181818", "#242424", "#FFF7ED", "#C9BFB3", "#FFC799", "#99FFE4", "#B7E58C", "#FFD08A", "#FF8080", "#4B433C"},
 }
 
 var themeDescriptions = map[string]string{
-	"catppuccin":  "soft lavender",
-	"dracula":     "electric violet",
-	"everforest":  "forest dusk",
-	"github":      "neutral contrast",
-	"gruvbox":     "warm retro",
-	"kanagawa":    "ink and sakura",
-	"mono":        "high-contrast gray",
-	"nexus":       "violet signal",
-	"nord":        "polar calm",
-	"paper":       "bright violet",
-	"rose-pine":   "rose twilight",
-	"terminal":    "terminal colors",
-	"tokyo-night": "electric midnight",
+	"amber":           "warm instrument",
+	"ayu-mirage":      "golden dusk",
+	"catppuccin":      "soft lavender",
+	"dracula":         "electric violet",
+	"everforest":      "forest dusk",
+	"github":          "neutral contrast",
+	"gruvbox":         "warm retro",
+	"iceberg":         "glacial blue",
+	"kanagawa":        "ink and sakura",
+	"mono":            "high-contrast gray",
+	"nexus":           "violet signal",
+	"nord":            "polar calm",
+	"paper":           "bright violet",
+	"rose-pine":       "rose twilight",
+	"solarized-dark":  "balanced dusk",
+	"solarized-light": "balanced daylight",
+	"synthwave":       "neon pulse",
+	"terminal":        "terminal colors",
+	"tokyo-night":     "electric midnight",
+	"vesper":          "quiet ember",
 }
 
 func themeDescription(name string) string {
@@ -213,6 +227,6 @@ func printThemeList(cmd *cobra.Command, color bool) {
 		if name == normalizeThemeName(loadedConfig.UI.Theme) {
 			marker = "›"
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %-13s %s\n", marker, name, sample)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %-16s %s\n", marker, name, sample)
 	}
 }

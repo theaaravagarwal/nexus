@@ -46,6 +46,7 @@ const (
 	actionFleet     dashboardAction = "fleet"
 	actionThemes    dashboardAction = "themes"
 	actionWorkspace dashboardAction = "workspace"
+	actionSettings  dashboardAction = "settings"
 	actionProbe     dashboardAction = "probe"
 	actionProbeAll  dashboardAction = "probe-all"
 )
@@ -127,6 +128,13 @@ type workspaceSaveMsg struct {
 	Err  error
 }
 
+type settingsSaveMsg struct {
+	Key     string
+	Value   string
+	Enabled bool
+	Err     error
+}
+
 type dashboardOperation struct {
 	operationSummary
 	Output string
@@ -204,6 +212,10 @@ type dashboardModel struct {
 	workspaceOriginal  string
 	workspaceSaving    bool
 	workspace          string
+	settingsOpen       bool
+	settingsCursor     int
+	settingsSaving     bool
+	experimentalTabs   bool
 	showTopology       bool
 	probing            bool
 	probeQueue         []string
@@ -250,6 +262,7 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 		plain:            noColorRequested(),
 		theme:            activeTheme(),
 		workspace:        normalizeWorkspaceMode(loadedConfig.UI.Workspace),
+		experimentalTabs: loadedConfig.UI.ExperimentalTabs,
 		now:              now,
 		telemetry:        make(map[string]hostTelemetry),
 		telemetryGen:     1,
@@ -659,6 +672,32 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = "Workspace saved as default: " + msg.Name
 		m.noticeError = false
 		return m, nil
+	case settingsSaveMsg:
+		m.settingsSaving = false
+		if msg.Err != nil {
+			m.notice = "Setting save failed: " + sanitizeTerminalText(msg.Err.Error())
+			m.noticeError = true
+			return m, nil
+		}
+		switch msg.Key {
+		case "background":
+			selectedTheme := m.theme.Name
+			loadedConfig.UI.Background = msg.Value
+			m.theme = resolvedTheme(selectedTheme)
+			m.themeOriginal = m.theme
+			m.themePreview = false
+			m.notice = "Background saved: " + msg.Value
+		case "experimental_tabs":
+			loadedConfig.UI.ExperimentalTabs = msg.Enabled
+			m.experimentalTabs = msg.Enabled
+			state := "off"
+			if msg.Enabled {
+				state = "on"
+			}
+			m.notice = "Experimental workspace tabs: " + state
+		}
+		m.noticeError = false
+		return m, nil
 	case terminalActionFinishedMsg:
 		m.terminalRunning = false
 		if msg.OperationID != m.operationID {
@@ -808,7 +847,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	key := msg.String()
+	key := dashboardNavigationKey(msg.String())
 	if key == "ctrl+c" {
 		m.done = true
 		return m, tea.Quit
@@ -944,6 +983,22 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.settingsOpen {
+		items := settingsItems()
+		switch key {
+		case "esc":
+			m.settingsOpen = false
+		case "k":
+			m.settingsCursor = (m.settingsCursor + len(items) - 1) % len(items)
+		case "j":
+			m.settingsCursor = (m.settingsCursor + 1) % len(items)
+		case "h", "left":
+			return m.updateSetting(items[m.settingsCursor], -1)
+		case "l", "right", "enter", " ":
+			return m.updateSetting(items[m.settingsCursor], 1)
+		}
+		return m, nil
+	}
 	if m.commandOpen {
 		commands := m.filteredCommands()
 		switch key {
@@ -969,14 +1024,14 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandCursor = 0
 			}
 		case "k":
-			if m.commandFiltering {
+			if m.commandFiltering && msg.Type == tea.KeyRunes {
 				m.commandQuery += "k"
 				m.commandCursor = 0
 			} else {
 				m.commandCursor = max(0, m.commandCursor-1)
 			}
 		case "j":
-			if m.commandFiltering {
+			if m.commandFiltering && msg.Type == tea.KeyRunes {
 				m.commandQuery += "j"
 				m.commandCursor = 0
 			} else {
@@ -1040,6 +1095,12 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.commandOpen = false
 				m.commandFiltering = false
 				m.openWorkspacePreview()
+				return m, usageCmd
+			case actionSettings:
+				m.commandOpen = false
+				m.commandFiltering = false
+				m.commandQuery = ""
+				m.settingsOpen = true
 				return m, usageCmd
 			case actionConfig:
 				updated, commandCmd := m.choose(actionConfig)
@@ -1125,6 +1186,10 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.query = string(runes[:len(runes)-1])
 				m.applyFilter()
 			}
+		case "k":
+			m.moveCursor(-1)
+		case "j":
+			m.moveCursor(1)
 		default:
 			if msg.Type == tea.KeyRunes {
 				m.query += sanitizeTerminalText(string(msg.Runes))
@@ -1146,8 +1211,18 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(-1)
 		}
+	case "left":
+		if m.workspaceTabsVisible() {
+			m.cycleWorkspace(-1)
+		}
+	case "right":
+		if m.workspaceTabsVisible() {
+			m.cycleWorkspace(1)
+		}
 	case "h":
 		m.helpOpen = true
+	case ",":
+		m.settingsOpen = true
 	case "/":
 		m.filtering = true
 	case "a":
@@ -1175,8 +1250,19 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func dashboardNavigationKey(key string) string {
+	switch key {
+	case "up":
+		return "k"
+	case "down":
+		return "j"
+	default:
+		return key
+	}
+}
+
 func (m dashboardModel) telemetryPaused() bool {
-	return m.helpOpen || m.commandOpen || m.themeOpen || m.workspaceOpen || m.confirmOpen ||
+	return m.helpOpen || m.commandOpen || m.themeOpen || m.workspaceOpen || m.settingsOpen || m.confirmOpen ||
 		m.transfer != nil || m.commandResult != nil || m.showTopology || m.terminalRunning
 }
 
@@ -1202,8 +1288,63 @@ func workspaceModes() []string {
 	return []string{"workbench", "console", "fleet"}
 }
 
+type settingsItem string
+
+const (
+	settingTheme            settingsItem = "theme"
+	settingBackground       settingsItem = "background"
+	settingExperimentalTabs settingsItem = "experimental-tabs"
+	settingWorkspace        settingsItem = "workspace"
+	settingConfig           settingsItem = "config"
+)
+
+func settingsItems() []settingsItem {
+	return []settingsItem{
+		settingTheme,
+		settingBackground,
+		settingExperimentalTabs,
+		settingWorkspace,
+		settingConfig,
+	}
+}
+
+func (m dashboardModel) updateSetting(item settingsItem, direction int) (tea.Model, tea.Cmd) {
+	if m.settingsSaving {
+		return m, nil
+	}
+	switch item {
+	case settingTheme:
+		if direction < 0 {
+			return m, nil
+		}
+		m.openThemePreview()
+	case settingBackground:
+		background := "transparent"
+		if loadedConfig.UI.Background == "transparent" {
+			background = "opaque"
+		}
+		m.settingsSaving = true
+		return m, m.saveSettingsCommand("background", background, false)
+	case settingExperimentalTabs:
+		m.settingsSaving = true
+		return m, m.saveSettingsCommand("experimental_tabs", "", !m.experimentalTabs)
+	case settingWorkspace:
+		if direction < 0 {
+			return m, nil
+		}
+		m.openWorkspacePreview()
+	case settingConfig:
+		if direction < 0 {
+			return m, nil
+		}
+		m.settingsOpen = false
+		return m.choose(actionConfig)
+	}
+	return m, nil
+}
+
 func (m dashboardModel) workspaceTabsVisible() bool {
-	return m.width >= 150 && m.height >= 28
+	return m.experimentalTabs && m.width >= 150 && m.height >= 28
 }
 
 func (m *dashboardModel) cycleWorkspace(delta int) {
@@ -1242,6 +1383,22 @@ func (m dashboardModel) saveWorkspaceCommand(name string) tea.Cmd {
 	configPath := m.configPath
 	return func() tea.Msg {
 		return workspaceSaveMsg{Name: name, Err: saveWorkspaceToConfig(configPath, name)}
+	}
+}
+
+func (m dashboardModel) saveSettingsCommand(key, value string, enabled bool) tea.Cmd {
+	configPath := m.configPath
+	return func() tea.Msg {
+		var err error
+		switch key {
+		case "background":
+			err = saveBackgroundToConfig(configPath, value)
+		case "experimental_tabs":
+			err = saveExperimentalTabsToConfig(configPath, enabled)
+		default:
+			err = fmt.Errorf("unknown UI setting %q", key)
+		}
+		return settingsSaveMsg{Key: key, Value: value, Enabled: enabled, Err: err}
 	}
 }
 
@@ -1569,9 +1726,7 @@ func (m dashboardModel) displayNameForTarget(target string) string {
 func (m dashboardModel) availableCommands() []dashboardCommand {
 	if m.selectedTarget() == "" {
 		commands := []dashboardCommand{
-			{Label: "Themes", Description: "Preview or save a theme", Action: actionThemes},
-			{Label: "Workspace", Description: "Choose the dashboard layout", Action: actionWorkspace},
-			{Label: "Config", Description: "Commands, profiles, and themes", Action: actionConfig},
+			{Label: "Settings", Description: "Themes, workspace, and config", Action: actionSettings},
 		}
 		m.sortCommandsByUsage(commands)
 		return commands
@@ -1588,15 +1743,13 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 		{"Network", "Open network diagnostics", actionNet, commandConfig{}},
 		{"Storage", "Inspect storage volumes", actionStorage, commandConfig{}},
 		{"Fleet", "Inspect saved hosts", actionFleet, commandConfig{}},
-		{"Themes", "Preview or save a theme", actionThemes, commandConfig{}},
-		{"Workspace", "Choose the dashboard layout", actionWorkspace, commandConfig{}},
+		{"Settings", "Themes, workspace, and config", actionSettings, commandConfig{}},
 	}
 	for _, command := range commandsForTarget(m.selectedTarget()) {
 		commands = append(commands, dashboardCommand{
 			Label: command.Name, Description: command.Description, Action: actionCustom, Command: command,
 		})
 	}
-	commands = append(commands, dashboardCommand{"Config", "Commands, profiles, and themes", actionConfig, commandConfig{}})
 	m.sortCommandsByUsage(commands)
 	return commands
 }
@@ -1604,6 +1757,10 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 func (m dashboardModel) sortCommandsByUsage(commands []dashboardCommand) {
 	pinOrder := make(map[string]int, len(loadedConfig.UI.PinnedActions))
 	for index, pin := range loadedConfig.UI.PinnedActions {
+		pin = normalizedDashboardPin(pin)
+		if _, exists := pinOrder[pin]; exists {
+			continue
+		}
 		pinOrder[pin] = index
 	}
 	sort.SliceStable(commands, func(left, right int) bool {
@@ -1619,6 +1776,15 @@ func (m dashboardModel) sortCommandsByUsage(commands []dashboardCommand) {
 		rightUses := m.actionUses[dashboardActionUsageKey(commands[right].Action, commands[right].Command)]
 		return leftUses > rightUses
 	})
+}
+
+func normalizedDashboardPin(pin string) string {
+	switch pin {
+	case "themes", "workspace", "config":
+		return "settings"
+	default:
+		return pin
+	}
 }
 
 func dashboardCommandPinKey(command dashboardCommand) string {
@@ -1675,6 +1841,9 @@ func (m dashboardModel) View() string {
 	}
 	if m.workspaceOpen {
 		return m.finishView(m.workspacePreviewView())
+	}
+	if m.settingsOpen {
+		return m.finishView(m.settingsView())
 	}
 	if m.height < 16 {
 		return m.finishView(m.shortView())
@@ -1941,7 +2110,7 @@ func (m dashboardModel) actionRailView(s dashboardStyles, width, height int) str
 	commands := m.availableCommands()
 	pins := make(map[string]struct{}, len(loadedConfig.UI.PinnedActions))
 	for _, pin := range loadedConfig.UI.PinnedActions {
-		pins[pin] = struct{}{}
+		pins[normalizedDashboardPin(pin)] = struct{}{}
 	}
 	limit := min(len(commands), min(8, max(4, (height-8)/2)))
 	for _, command := range commands[:limit] {
@@ -2757,7 +2926,7 @@ func (m dashboardModel) commandPaletteView() string {
 	width := m.overlayWidth(74)
 	innerWidth := m.overlayContentWidth(width)
 	contentHeight := m.overlayContentHeight()
-	search := "[/] filter actions  ·  [j/k] move"
+	search := "[/] filter actions  ·  [↑/↓ or j/k] move"
 	if m.commandFiltering {
 		search = "Filter: " + m.commandQuery + "█"
 	}
@@ -2906,13 +3075,14 @@ func (m dashboardModel) themePreviewRow(s dashboardStyles, name string, selected
 	}
 
 	t := resolvedTheme(name)
-	nameWidth := min(12, max(4, width-12))
+	nameWidth := min(16, max(4, width-12))
+	displayName := truncateText(name, nameWidth)
 	if m.plain {
 		marker := "  "
 		if selected {
 			marker = "› "
 		}
-		row := marker + padCell(name, nameWidth) + " " + themeSwatch(t, true, false)
+		row := marker + padCell(displayName, nameWidth) + " " + themeSwatch(t, true, false)
 		remaining := max(0, width-lipgloss.Width(row))
 		if remaining > 1 {
 			detail := themeDescription(name)
@@ -2938,7 +3108,7 @@ func (m dashboardModel) themePreviewRow(s dashboardStyles, name string, selected
 		marker = "› "
 		labelStyle, detailStyle = s.selected, s.selectedMuted
 	}
-	left := labelStyle.Render(marker + padCell(name, nameWidth) + " ")
+	left := labelStyle.Render(marker + padCell(displayName, nameWidth) + " ")
 	swatch := themeSwatch(t, false, selected)
 	remaining := max(0, width-lipgloss.Width(left)-lipgloss.Width(swatch))
 	if remaining == 0 {
@@ -3005,6 +3175,95 @@ func (m dashboardModel) workspacePreviewView() string {
 	}
 	lines = append(lines, s.muted.Render(truncateText(footer, innerWidth)))
 	return m.overlayPanel(s, width, lines)
+}
+
+func (m dashboardModel) settingsView() string {
+	s := m.styles()
+	width := m.overlayWidth(82)
+	innerWidth := m.overlayContentWidth(width)
+	contentHeight := m.overlayContentHeight()
+	items := settingsItems()
+	values := map[settingsItem]string{
+		settingTheme:      m.theme.Name,
+		settingBackground: strings.ToUpper(loadedConfig.UI.Background),
+		settingWorkspace:  strings.ToUpper(normalizeWorkspaceMode(m.workspace)),
+		settingConfig:     "OPEN IN EDITOR",
+	}
+	if m.experimentalTabs {
+		values[settingExperimentalTabs] = "● ON · EXPERIMENTAL"
+	} else {
+		values[settingExperimentalTabs] = "○ OFF · EXPERIMENTAL"
+	}
+	details := map[settingsItem]string{
+		settingTheme:            "Preview palettes live, then use once or save the default.",
+		settingBackground:       "Opaque paints every cell; transparent preserves the terminal canvas.",
+		settingExperimentalTabs: "Prototype tab strip for terminals at least 150 columns wide.",
+		settingWorkspace:        "Choose the large-terminal layout used for this session or by default.",
+		settingConfig:           "Exit Nexus and open the YAML configuration in your editor.",
+	}
+
+	lines := []string{
+		s.focus.Render("SETTINGS"),
+		s.muted.Render(truncateText("Calm defaults · optional power features", innerWidth)),
+	}
+	compact := contentHeight < 17
+	start, end := 0, len(items)
+	if compact {
+		rowBudget := max(1, contentHeight-len(lines)-1)
+		start, end = selectionWindow(len(items), m.settingsCursor, rowBudget)
+	}
+	for index := start; index < end; index++ {
+		item := items[index]
+		if !compact {
+			switch item {
+			case settingTheme:
+				lines = append(lines, "", s.focus.Render("APPEARANCE"))
+			case settingExperimentalTabs:
+				lines = append(lines, "", s.focus.Render("NAVIGATION"))
+			case settingConfig:
+				lines = append(lines, "", s.focus.Render("ADVANCED"))
+			}
+		}
+		label := map[settingsItem]string{
+			settingTheme:            "Theme",
+			settingBackground:       "Background",
+			settingExperimentalTabs: "Workspace tabs",
+			settingWorkspace:        "Default workspace",
+			settingConfig:           "Configuration file",
+		}[item]
+		lines = append(lines, settingsRow(s, label, values[item], index == m.settingsCursor, innerWidth))
+	}
+	if !compact {
+		lines = append(lines, "", s.muted.Render(truncateText(details[items[m.settingsCursor]], innerWidth)))
+	}
+	if m.settingsSaving {
+		lines = append(lines, s.live.Render("◌ saving setting…"))
+	} else if m.noticeError && strings.HasPrefix(m.notice, "Setting save failed:") {
+		lines = append(lines, s.failure.Render(truncateText(m.notice, innerWidth)))
+	}
+	footer := "[↑/↓ or j/k] move   [←/→ or h/l] change   [enter] open   [esc] back"
+	if innerWidth < 32 {
+		footer = "enter change · esc back"
+	} else if innerWidth < 58 {
+		footer = "j/k move · enter · esc back"
+	}
+	lines = append(lines, s.muted.Render(truncateText(footer, innerWidth)))
+	return m.overlayPanel(s, width, lines)
+}
+
+func settingsRow(s dashboardStyles, label, value string, selected bool, width int) string {
+	marker := "  "
+	if selected {
+		marker = "› "
+	}
+	label = truncateText(label, max(1, width-12))
+	gap := max(1, width-lipgloss.Width(marker)-lipgloss.Width(label)-lipgloss.Width(value))
+	row := marker + label + strings.Repeat(" ", gap) + value
+	row = padCell(truncateText(row, width), width)
+	if selected {
+		return s.selected.Render(row)
+	}
+	return s.text.Render(row)
 }
 
 func (m dashboardModel) fleetView() string {
@@ -3263,12 +3522,14 @@ func (m dashboardModel) helpView() string {
 	if contentHeight < 19 || innerWidth < 52 {
 		compact := []string{
 			s.focus.Render("NEXUS KEYS"),
-			truncateText("j/k move · enter connect", innerWidth),
-			truncateText("tab workspace on wide screens", innerWidth),
-			truncateText("/ find · a actions", innerWidth),
+			truncateText("↑/↓ j/k · enter connect", innerWidth),
+			truncateText("/ find · a actions · , settings", innerWidth),
 			truncateText("h keys · q quit", innerWidth),
-			truncateText("lists: j/k · enter choose", innerWidth),
+			truncateText("lists: arrows or j/k · enter choose", innerWidth),
 			s.muted.Render(truncateText("esc closes this view", innerWidth)),
+		}
+		if m.experimentalTabs {
+			compact = append(compact[:2], append([]string{truncateText("tab workspace on wide screens", innerWidth)}, compact[2:]...)...)
 		}
 		return m.overlayPanel(s, width, compact)
 	}
@@ -3276,15 +3537,15 @@ func (m dashboardModel) helpView() string {
 		s.focus.Render("NEXUS KEYS"),
 		"",
 		s.focus.Render("WORKSPACE"),
-		"j / k        move between hosts",
+		"↑/↓ or j/k   move between hosts",
 		"enter        connect with SSH",
-		"tab          cycle workspace tabs on wide screens",
 		"/            find hosts",
 		"a            all actions and saved commands",
+		",            open settings",
 		"h            open this key reference",
 		"q            quit Nexus",
 		"",
-		"LISTS         j/k move · enter choose · esc back",
+		"LISTS         arrows or j/k move · enter choose · esc back",
 		"ACTION FILTER / start · backspace edit · enter first match",
 		"THEME         s save default",
 		"FAILED SCAN   r retry",
@@ -3293,6 +3554,9 @@ func (m dashboardModel) helpView() string {
 		"SSH AUTH      OpenSSH handles interactive prompts",
 		"",
 		"● online   ! refused   × unavailable   ◌ checking",
+	}
+	if m.experimentalTabs {
+		help = append(help[:5], append([]string{"tab          cycle workspace tabs on wide screens"}, help[5:]...)...)
 	}
 	return m.overlayPanel(s, width, help)
 }
@@ -3569,6 +3833,8 @@ func actionLabel(action dashboardAction) string {
 		return "Configuration"
 	case actionWorkspace:
 		return "Workspace"
+	case actionSettings:
+		return "Settings"
 	default:
 		return "Action"
 	}
