@@ -27,6 +27,17 @@ func chooseDashboardAction(t *testing.T, model dashboardModel, query string) (da
 	return updated.(dashboardModel), cmd
 }
 
+func settingsCursorFor(t *testing.T, item settingsItem) int {
+	t.Helper()
+	for index, candidate := range settingsItems() {
+		if candidate == item {
+			return index
+		}
+	}
+	t.Fatalf("settings item %q not found", item)
+	return 0
+}
+
 func TestDashboardFiltersAndChoosesAction(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one", "bob@two:2222"})
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
@@ -417,8 +428,9 @@ func TestDashboardUsesOneCanonicalWorkspaceKeyMap(t *testing.T) {
 
 	for _, want := range []string{
 		"↑/↓ or j/k   move between hosts",
-		"tab          cycle workspace tabs on wide screens",
+		"tab          cycle Hosts, Monitor, and Fleet",
 		"a            all actions and saved commands",
+		"o            open or close Activity",
 		",            open settings",
 		"LISTS         arrows or j/k move · enter choose · esc back",
 		"THEME         s save default",
@@ -439,12 +451,12 @@ func TestDashboardWideWorkspaceTabsCycleWithoutAffectingCompactLayouts(t *testin
 	model.experimentalTabs = true
 	model.width, model.height = 150, 32
 
-	for _, label := range []string{"WORKBENCH", "CONSOLE", "FLEET"} {
+	for _, label := range []string{"HOSTS", "MONITOR", "FLEET"} {
 		if !strings.Contains(model.View(), label) {
 			t.Fatalf("wide header missing workspace tab %q:\n%s", label, model.View())
 		}
 	}
-	for _, context := range []string{"HOSTS · j/k move", "[tab] workspace"} {
+	for _, context := range []string{"HOSTS · j/k move", "[tab] switch tab"} {
 		if !strings.Contains(model.View(), context) {
 			t.Fatalf("wide layout missing keyboard context %q:\n%s", context, model.View())
 		}
@@ -452,7 +464,8 @@ func TestDashboardWideWorkspaceTabsCycleWithoutAffectingCompactLayouts(t *testin
 
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
 	model = updated.(dashboardModel)
-	if model.workspace != "console" || !strings.Contains(model.View(), "OPERATIONS CONSOLE") {
+	if model.workspace != "console" || !strings.Contains(model.View(), "LIVE MONITOR") ||
+		!strings.Contains(model.View(), "ACTIONS") {
 		t.Fatalf("tab did not open console workspace: workspace=%q\n%s", model.workspace, model.View())
 	}
 	if strings.Contains(model.View(), "PINNED & FREQUENT") {
@@ -479,6 +492,64 @@ func TestDashboardWideWorkspaceTabsCycleWithoutAffectingCompactLayouts(t *testin
 	model = updated.(dashboardModel)
 	if model.workspace != "console" {
 		t.Fatalf("compact layout unexpectedly changed workspace to %q", model.workspace)
+	}
+}
+
+func TestDashboardTabbedModeAlwaysStartsOnHosts(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+	loadedConfig.UI.ExperimentalTabs = true
+	loadedConfig.UI.Workspace = "fleet"
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.width, model.height = 180, 40
+	if model.workspace != "workbench" || !strings.Contains(model.View(), "HOSTS") {
+		t.Fatalf("tabbed mode did not start on Hosts: workspace=%q\n%s", model.workspace, model.View())
+	}
+}
+
+func TestDashboardHostsTabUsesCompactContextualActions(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.experimentalTabs = true
+	model.width, model.height = 180, 40
+	view := model.View()
+	for _, want := range []string{"[enter] connect", "[a] actions", "[r] refresh", "[o] activity"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Hosts action bar missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "PINNED & FREQUENT") {
+		t.Fatalf("Hosts tab retained the permanent action rail:\n%s", view)
+	}
+}
+
+func TestDashboardMonitorActionRailIsKeyboardFocusable(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(dashboardModel)
+	if !model.monitorActionFocus || !strings.Contains(model.View(), "› Connect") {
+		t.Fatalf("Monitor action rail did not receive focus:\n%s", model.View())
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(dashboardModel)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.metadataBusy["alice@one"] || model.operation == nil ||
+		model.operation.Action != string(actionInfo) {
+		t.Fatalf("focused Monitor action did not run in context: cmd=%v model=%#v", cmd, model)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	model = updated.(dashboardModel)
+	if model.monitorActionFocus {
+		t.Fatal("Monitor action rail did not return focus")
 	}
 }
 
@@ -684,6 +755,7 @@ func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
 	if cmd != nil || !model.settingsOpen {
 		t.Fatalf("theme search did not open settings: cmd=%v model=%#v", cmd, model)
 	}
+	model.settingsCursor = settingsCursorFor(t, settingTheme)
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(dashboardModel)
 	if cmd != nil || !model.themeOpen {
@@ -706,6 +778,7 @@ func TestDashboardThemePreviewStaysInsideTUI(t *testing.T) {
 func TestDashboardNestedThemePickerReturnsToSettings(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.settingsOpen = true
+	model.settingsCursor = settingsCursorFor(t, settingTheme)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(dashboardModel)
 	if !model.themeOpen || !model.settingsOpen {
@@ -762,6 +835,7 @@ func TestDashboardThemeShortcutSavesDefaultInsideTUI(t *testing.T) {
 	if cmd != nil || !model.settingsOpen {
 		t.Fatalf("theme action did not open settings: cmd=%v model=%#v", cmd, model)
 	}
+	model.settingsCursor = settingsCursorFor(t, settingTheme)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(dashboardModel)
 	if !model.themeOpen {
@@ -803,7 +877,7 @@ func TestDashboardSettingsPersistExperimentalTabsInsideTUI(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.configPath = configPath
 	model.settingsOpen = true
-	model.settingsCursor = 2
+	model.settingsCursor = settingsCursorFor(t, settingExperimentalTabs)
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(dashboardModel)
 	if cmd == nil || !model.settingsSaving || model.experimentalTabs {
@@ -824,6 +898,65 @@ func TestDashboardSettingsPersistExperimentalTabsInsideTUI(t *testing.T) {
 	}
 }
 
+func TestDashboardSettingsApplyVisualProfileInsideTUI(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(defaultConfigYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := newDashboardModel([]string{"alice@one"})
+	model.configPath = configPath
+	model.settingsOpen = true
+	model.settingsCursor = settingsCursorFor(t, settingProfile)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.settingsSaving || model.profile != "calm" {
+		t.Fatalf("profile save did not start cleanly: cmd=%v model=%#v", cmd, model)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(dashboardModel)
+	if model.settingsSaving || model.profile != "signal" || model.theme.Name != "synthwave" ||
+		model.density != "compact" || loadedConfig.UI.Background != "opaque" || model.noticeError {
+		t.Fatalf("signal profile was not applied in context: %#v", model)
+	}
+	cfg, err := loadAppConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UI.Profile != "signal" || cfg.UI.Theme != "synthwave" || cfg.UI.Density != "compact" {
+		t.Fatalf("profile was not persisted: %#v", cfg.UI)
+	}
+}
+
+func TestDashboardActivityDrawerPreservesWorkspaceAndShowsOutput(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.experimentalTabs = true
+	model.width, model.height = 180, 40
+	model.activities = []activityEvent{
+		{Label: "Refresh info", Host: "alice@one", Status: "success", Summary: "Updated", Output: "Ubuntu 26.04"},
+		{Label: "Storage", Host: "alice@one", Status: "error", Summary: "Timed out", Output: "retry later"},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	model = updated.(dashboardModel)
+	view := model.View()
+	for _, want := range []string{"HOSTS", "ACTIVITY", "Storage · alice@one", "retry later", "[o/esc] close"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Activity drawer missing %q:\n%s", want, view)
+		}
+	}
+	assertTerminalBounds(t, view, model.width, model.height, "activity drawer")
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(dashboardModel)
+	if model.activityOpen || model.workspace != "workbench" {
+		t.Fatalf("Activity drawer did not restore Hosts context: %#v", model)
+	}
+}
+
 func TestDashboardSettingsSaveFailureKeepsCurrentValueAndContext(t *testing.T) {
 	previous := loadedConfig
 	t.Cleanup(func() { loadedConfig = previous })
@@ -832,7 +965,7 @@ func TestDashboardSettingsSaveFailureKeepsCurrentValueAndContext(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.configPath = ""
 	model.settingsOpen = true
-	model.settingsCursor = 2
+	model.settingsCursor = settingsCursorFor(t, settingExperimentalTabs)
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(dashboardModel)
 	if cmd == nil || !model.settingsSaving {
@@ -1137,6 +1270,31 @@ func TestDashboardAllWorkspaceModesStayResponsive(t *testing.T) {
 	}
 }
 
+func TestDashboardTabbedModesAndDensitiesStayResponsive(t *testing.T) {
+	markers := map[string]string{
+		"workbench": "[r] refresh",
+		"console":   "LIVE MONITOR",
+		"fleet":     "FLEET WORKSPACE",
+	}
+	for _, density := range []string{"adaptive", "compact", "comfortable"} {
+		for _, mode := range workspaceModes() {
+			for _, size := range [][2]int{{150, 28}, {180, 40}, {240, 80}} {
+				model := newDashboardModel([]string{"alice@one", "bob@two"})
+				model.plain = true
+				model.experimentalTabs = true
+				model.workspace = mode
+				model.density = density
+				model.width, model.height = size[0], size[1]
+				view := model.View()
+				assertTerminalBounds(t, view, size[0], size[1], density+" "+mode)
+				if !strings.Contains(view, markers[mode]) {
+					t.Fatalf("density=%s mode=%s size=%v missing %q:\n%s", density, mode, size, markers[mode], view)
+				}
+			}
+		}
+	}
+}
+
 func TestDashboardThemeStylesPaintPanelTextContinuously(t *testing.T) {
 	for name, theme := range themes {
 		model := newDashboardModel([]string{"alice@one"})
@@ -1396,7 +1554,7 @@ func TestDashboardHeaderHierarchyStaysResponsiveAtBreakpoints(t *testing.T) {
 		if width == 149 && !strings.Contains(view, "choose a host") {
 			t.Fatalf("regular workspace context disappeared:\n%s", view)
 		}
-		if width == 150 && !strings.Contains(view, "WORKBENCH") {
+		if width == 150 && !strings.Contains(view, "HOSTS") {
 			t.Fatalf("ultra-wide workspace context missing:\n%s", view)
 		}
 		if count := strings.Count(view, "probing "); count != 1 {

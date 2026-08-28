@@ -28,7 +28,8 @@ host_profiles:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.UI.Theme != "nexus" || cfg.UI.ExperimentalTabs || cfg.FullIndexDepth != 7 {
+	if cfg.UI.Theme != "nexus" || cfg.UI.Profile != "calm" || cfg.UI.Density != "adaptive" ||
+		cfg.UI.ExperimentalTabs || cfg.FullIndexDepth != 7 {
 		t.Fatalf("unexpected defaults: %#v", cfg)
 	}
 	if cfg.FZF.Theme != "cyberpunk" {
@@ -36,6 +37,54 @@ host_profiles:
 	}
 	if !cfg.HostProfiles["example.com"].RsyncStability {
 		t.Fatal("legacy host profile lost")
+	}
+}
+
+func TestSaveVisualProfileAppliesPresetAtomicallyAndPreservesComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `# keep profile note
+ui:
+  profile: calm
+  theme: nord
+  background: transparent
+  density: comfortable
+  experimental_tabs: true
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveVisualProfileToConfig(path, "signal"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UI.Profile != "signal" || cfg.UI.Theme != "synthwave" ||
+		cfg.UI.Background != "opaque" || cfg.UI.Density != "compact" || !cfg.UI.ExperimentalTabs {
+		t.Fatalf("profile preset was not applied cleanly: %#v", cfg.UI)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "# keep profile note") {
+		t.Fatalf("profile save lost comments:\n%s", saved)
+	}
+}
+
+func TestLoadAppConfigRejectsUnknownProfileAndDensity(t *testing.T) {
+	for _, raw := range []string{
+		"ui:\n  profile: loud\n",
+		"ui:\n  density: crushed\n",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadAppConfig(path); err == nil {
+			t.Fatalf("accepted invalid UI config:\n%s", raw)
+		}
 	}
 }
 
@@ -272,7 +321,8 @@ ui:
 func TestDefaultConfigIncludesSavedCommandExamples(t *testing.T) {
 	config := defaultConfigYAML()
 	for _, want := range []string{
-		"choose Settings", "workspace: workbench", "experimental_tabs: false", "pinned_actions:", "add: command:tmux",
+		"choose Settings", "profile: calm", "density: adaptive", "workspace: workbench",
+		"experimental_tabs: false", "pinned_actions:", "add: command:tmux",
 		"id: disk-usage", "disk usage", "journalctl -u app", "confirm: true", "exact user@host:port",
 	} {
 		if !strings.Contains(config, want) {

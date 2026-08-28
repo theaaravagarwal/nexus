@@ -25,6 +25,74 @@ type theme struct {
 	Border     string
 }
 
+type visualProfile struct {
+	Name        string
+	Theme       string
+	Background  string
+	Density     string
+	Description string
+}
+
+var visualProfilePresets = []visualProfile{
+	{Name: "calm", Theme: "nexus", Background: "opaque", Density: "adaptive", Description: "quiet technical instrument"},
+	{Name: "signal", Theme: "synthwave", Background: "opaque", Density: "compact", Description: "expressive command center"},
+	{Name: "terminal", Theme: "terminal", Background: "transparent", Density: "compact", Description: "native terminal restraint"},
+}
+
+func visualProfileNames() []string {
+	names := make([]string, 0, len(visualProfilePresets))
+	for _, preset := range visualProfilePresets {
+		names = append(names, preset.Name)
+	}
+	return names
+}
+
+func visualProfileByName(name string) (visualProfile, bool) {
+	name = normalizeVisualProfile(name)
+	for _, preset := range visualProfilePresets {
+		if preset.Name == name {
+			return preset, true
+		}
+	}
+	return visualProfile{}, false
+}
+
+func normalizeVisualProfile(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "calm"
+	}
+	for _, preset := range visualProfilePresets {
+		if preset.Name == name {
+			return name
+		}
+	}
+	return ""
+}
+
+func normalizeUIDensity(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "adaptive"
+	}
+	switch name {
+	case "adaptive", "compact", "comfortable":
+		return name
+	default:
+		return ""
+	}
+}
+
+func themeWithBackground(name, background string) theme {
+	t := themeWithOverrides(name)
+	if background == "transparent" {
+		t.Background = ""
+		t.Surface = ""
+		t.Elevated = ""
+	}
+	return t
+}
+
 var themes = map[string]theme{
 	"amber":           {"amber", "#140F08", "#20180E", "#2C2113", "#FFF3D6", "#D0B987", "#FFB454", "#6FE7C8", "#A8D96B", "#FFD166", "#FF7B72", "#5D4527"},
 	"ayu-mirage":      {"ayu-mirage", "#171B24", "#1F2430", "#2A3140", "#F3F4F5", "#B8C0CC", "#FFD580", "#73D0FF", "#BAE67E", "#FFD580", "#FF7A90", "#455064"},
@@ -110,6 +178,16 @@ func activeTheme() theme {
 }
 
 func resolvedTheme(name string) theme {
+	t := themeWithOverrides(name)
+	if loadedConfig.UI.Background == "transparent" {
+		t.Background = ""
+		t.Surface = ""
+		t.Elevated = ""
+	}
+	return t
+}
+
+func themeWithOverrides(name string) theme {
 	name = normalizeThemeName(name)
 	t, ok := themes[name]
 	if !ok {
@@ -144,11 +222,6 @@ func resolvedTheme(name string) theme {
 		case "border":
 			t.Border = value
 		}
-	}
-	if loadedConfig.UI.Background == "transparent" {
-		t.Background = ""
-		t.Surface = ""
-		t.Elevated = ""
 	}
 	return t
 }

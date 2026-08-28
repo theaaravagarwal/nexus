@@ -25,6 +25,8 @@ type commandConfig struct {
 type uiConfig struct {
 	Theme            string            `yaml:"theme"`
 	Background       string            `yaml:"background"`
+	Profile          string            `yaml:"profile,omitempty"`
+	Density          string            `yaml:"density,omitempty"`
 	Workspace        string            `yaml:"workspace,omitempty"`
 	ExperimentalTabs bool              `yaml:"experimental_tabs,omitempty"`
 	PinnedActions    []string          `yaml:"pinned_actions,omitempty"`
@@ -66,6 +68,8 @@ func defaultAppConfig() appConfig {
 		UI: uiConfig{
 			Theme:         "nexus",
 			Background:    "opaque",
+			Profile:       "calm",
+			Density:       "adaptive",
 			Workspace:     "workbench",
 			PinnedActions: []string{"ssh", "info", "storage"},
 		},
@@ -114,10 +118,14 @@ func defaultConfigYAML() string {
 full_index_depth: 5
 
 ui:
+  # calm | signal | terminal. Presets remain individually customizable.
+  profile: calm
   # Run nexus theme list for every built-in palette.
   theme: nexus
   # opaque paints the theme background; transparent uses your terminal background.
   background: opaque
+  # adaptive | compact | comfortable
+  density: adaptive
   # workbench | console | fleet
   workspace: workbench
   # Prototype: show keyboard-switchable workspace tabs on wide terminals.
@@ -276,11 +284,41 @@ func saveExperimentalTabsToConfig(configPath string, enabled bool) error {
 	return saveUIScalar(configPath, "experimental_tabs", "!!bool", strconv.FormatBool(enabled))
 }
 
+func saveDensityToConfig(configPath, density string) error {
+	density = normalizeUIDensity(density)
+	if density == "" {
+		return fmt.Errorf("unknown UI density")
+	}
+	return saveUIValue(configPath, "density", density)
+}
+
+func saveVisualProfileToConfig(configPath, name string) error {
+	preset, ok := visualProfileByName(name)
+	if !ok {
+		return fmt.Errorf("unknown visual profile %q", name)
+	}
+	return saveUIValues(configPath, map[string]uiScalarValue{
+		"profile":    {Tag: "!!str", Value: preset.Name},
+		"theme":      {Tag: "!!str", Value: preset.Theme},
+		"background": {Tag: "!!str", Value: preset.Background},
+		"density":    {Tag: "!!str", Value: preset.Density},
+	})
+}
+
 func saveUIValue(configPath, key, value string) error {
 	return saveUIScalar(configPath, key, "!!str", value)
 }
 
 func saveUIScalar(configPath, key, tag, value string) error {
+	return saveUIValues(configPath, map[string]uiScalarValue{key: {Tag: tag, Value: value}})
+}
+
+type uiScalarValue struct {
+	Tag   string
+	Value string
+}
+
+func saveUIValues(configPath string, values map[string]uiScalarValue) error {
 	if configPath == "" {
 		return errors.New("config path is empty")
 	}
@@ -310,17 +348,25 @@ func saveUIScalar(configPath, key, tag, value string) error {
 	if ui.Kind != yaml.MappingNode {
 		return fmt.Errorf("invalid config YAML %s: ui must be a mapping", configPath)
 	}
-	valueNode := mappingValue(ui, key)
-	if valueNode == nil {
-		ui.Content = append(ui.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str"},
-		)
-		valueNode = ui.Content[len(ui.Content)-1]
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
 	}
-	valueNode.Kind = yaml.ScalarNode
-	valueNode.Tag = tag
-	valueNode.Value = value
+	sort.Strings(keys)
+	for _, key := range keys {
+		scalar := values[key]
+		valueNode := mappingValue(ui, key)
+		if valueNode == nil {
+			ui.Content = append(ui.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str"},
+			)
+			valueNode = ui.Content[len(ui.Content)-1]
+		}
+		valueNode.Kind = yaml.ScalarNode
+		valueNode.Tag = scalar.Tag
+		valueNode.Value = scalar.Value
+	}
 
 	var output bytes.Buffer
 	encoder := yaml.NewEncoder(&output)
@@ -368,6 +414,14 @@ func loadAppConfig(configPath string) (appConfig, error) {
 	}
 	if cfg.FZF.Theme == "nexus" {
 		cfg.FZF.Theme = cfg.UI.Theme
+	}
+	cfg.UI.Profile = normalizeVisualProfile(cfg.UI.Profile)
+	if cfg.UI.Profile == "" {
+		return appConfig{}, fmt.Errorf("ui.profile must be calm, signal, or terminal")
+	}
+	cfg.UI.Density = normalizeUIDensity(cfg.UI.Density)
+	if cfg.UI.Density == "" {
+		return appConfig{}, fmt.Errorf("ui.density must be adaptive, compact, or comfortable")
 	}
 	cfg.UI.Workspace = normalizeWorkspaceMode(cfg.UI.Workspace)
 	if cfg.UI.Workspace == "" {

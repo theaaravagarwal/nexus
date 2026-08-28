@@ -180,69 +180,75 @@ type transferFlow struct {
 }
 
 type dashboardModel struct {
-	hosts              []dashboardHost
-	filtered           []int
-	cursor             int
-	query              string
-	filtering          bool
-	width              int
-	height             int
-	choice             dashboardSelection
-	done               bool
-	commandOpen        bool
-	commandFiltering   bool
-	commandCursor      int
-	commandQuery       string
-	confirmOpen        bool
-	confirmAction      dashboardSelection
-	confirmOffset      int
-	commandResult      *configuredCommandResult
-	commandRunning     bool
-	commandOffset      int
-	actionUses         map[string]int
-	transfer           *transferFlow
-	helpOpen           bool
-	themeOpen          bool
-	themeCursor        int
-	themeOriginal      theme
-	themePreview       bool
-	themeSaving        bool
-	workspaceOpen      bool
-	workspaceCursor    int
-	workspaceOriginal  string
-	workspaceSaving    bool
-	workspace          string
-	settingsOpen       bool
-	settingsCursor     int
-	settingsSaving     bool
-	experimentalTabs   bool
-	showTopology       bool
-	probing            bool
-	probeQueue         []string
-	probeInitial       []string
-	probeTargets       map[string]bool
-	probeTotal         int
-	probeComplete      int
-	metadataBusy       map[string]bool
-	statePath          string
-	configPath         string
-	indexMode          string
-	notice             string
-	noticeError        bool
-	plain              bool
-	theme              theme
-	now                time.Time
-	operation          *dashboardOperation
-	operationPersisted bool
-	operationID        uint64
-	operationProbeID   uint64
-	terminalRunning    bool
-	telemetry          map[string]hostTelemetry
-	telemetryTarget    string
-	telemetryGen       uint64
-	telemetryFlight    uint64
-	telemetryFocused   bool
-	activities         []activityEvent
+	hosts               []dashboardHost
+	filtered            []int
+	cursor              int
+	query               string
+	filtering           bool
+	width               int
+	height              int
+	choice              dashboardSelection
+	done                bool
+	commandOpen         bool
+	commandFiltering    bool
+	commandCursor       int
+	commandQuery        string
+	confirmOpen         bool
+	confirmAction       dashboardSelection
+	confirmOffset       int
+	commandResult       *configuredCommandResult
+	commandRunning      bool
+	commandOffset       int
+	actionUses          map[string]int
+	transfer            *transferFlow
+	helpOpen            bool
+	themeOpen           bool
+	themeCursor         int
+	themeOriginal       theme
+	themePreview        bool
+	themeSaving         bool
+	workspaceOpen       bool
+	workspaceCursor     int
+	workspaceOriginal   string
+	workspaceSaving     bool
+	workspace           string
+	settingsOpen        bool
+	settingsCursor      int
+	settingsSaving      bool
+	profile             string
+	density             string
+	experimentalTabs    bool
+	monitorActionFocus  bool
+	monitorActionCursor int
+	activityOpen        bool
+	activityCursor      int
+	showTopology        bool
+	probing             bool
+	probeQueue          []string
+	probeInitial        []string
+	probeTargets        map[string]bool
+	probeTotal          int
+	probeComplete       int
+	metadataBusy        map[string]bool
+	statePath           string
+	configPath          string
+	indexMode           string
+	notice              string
+	noticeError         bool
+	plain               bool
+	theme               theme
+	now                 time.Time
+	operation           *dashboardOperation
+	operationPersisted  bool
+	operationID         uint64
+	operationProbeID    uint64
+	terminalRunning     bool
+	telemetry           map[string]hostTelemetry
+	telemetryTarget     string
+	telemetryGen        uint64
+	telemetryFlight     uint64
+	telemetryFocused    bool
+	activities          []activityEvent
 }
 
 func newDashboardModel(hosts []string) dashboardModel {
@@ -262,11 +268,16 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 		plain:            noColorRequested(),
 		theme:            activeTheme(),
 		workspace:        normalizeWorkspaceMode(loadedConfig.UI.Workspace),
+		profile:          normalizeVisualProfile(loadedConfig.UI.Profile),
+		density:          normalizeUIDensity(loadedConfig.UI.Density),
 		experimentalTabs: loadedConfig.UI.ExperimentalTabs,
 		now:              now,
 		telemetry:        make(map[string]hostTelemetry),
 		telemetryGen:     1,
 		telemetryFocused: true,
+	}
+	if model.experimentalTabs {
+		model.workspace = "workbench"
 	}
 	for action, count := range state.Actions {
 		model.actionUses[action] = count
@@ -554,6 +565,9 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = max(1, msg.Width)
 		m.height = max(1, msg.Height)
+		if m.height < 16 {
+			m.activityOpen = false
+		}
 		return m, nil
 	case probeTargetMsg:
 		result := reachabilityResult(msg)
@@ -680,6 +694,23 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.Key {
+		case "profile":
+			preset, ok := visualProfileByName(msg.Value)
+			if !ok {
+				m.notice = "Setting save failed: unknown visual profile"
+				m.noticeError = true
+				return m, nil
+			}
+			loadedConfig.UI.Profile = preset.Name
+			loadedConfig.UI.Theme = preset.Theme
+			loadedConfig.UI.Background = preset.Background
+			loadedConfig.UI.Density = preset.Density
+			m.profile = preset.Name
+			m.density = preset.Density
+			m.theme = themeWithBackground(preset.Theme, preset.Background)
+			m.themeOriginal = m.theme
+			m.themePreview = false
+			m.notice = "Visual profile applied: " + preset.Name
 		case "background":
 			selectedTheme := m.theme.Name
 			loadedConfig.UI.Background = msg.Value
@@ -687,9 +718,19 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.themeOriginal = m.theme
 			m.themePreview = false
 			m.notice = "Background saved: " + msg.Value
+		case "density":
+			loadedConfig.UI.Density = msg.Value
+			m.density = msg.Value
+			m.notice = "Interface density: " + msg.Value
 		case "experimental_tabs":
 			loadedConfig.UI.ExperimentalTabs = msg.Enabled
 			m.experimentalTabs = msg.Enabled
+			if msg.Enabled {
+				m.workspace = "workbench"
+				m.monitorActionFocus = false
+			} else {
+				m.workspace = normalizeWorkspaceMode(loadedConfig.UI.Workspace)
+			}
 			state := "off"
 			if msg.Enabled {
 				state = "on"
@@ -896,6 +937,18 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc":
 			m.helpOpen = false
+		}
+		return m, nil
+	}
+	if m.activityOpen {
+		events := m.activityDrawerEvents()
+		switch key {
+		case "esc", "o":
+			m.activityOpen = false
+		case "k":
+			m.activityCursor = max(0, m.activityCursor-1)
+		case "j":
+			m.activityCursor = min(max(0, len(events)-1), m.activityCursor+1)
 		}
 		return m, nil
 	}
@@ -1198,6 +1251,27 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.workspaceTabsVisible() && normalizeWorkspaceMode(m.workspace) == "console" {
+		commands := m.monitorActions()
+		if m.monitorActionFocus {
+			switch key {
+			case "h", "left", "esc":
+				m.monitorActionFocus = false
+				return m, nil
+			case "k":
+				m.monitorActionCursor = max(0, m.monitorActionCursor-1)
+				return m, nil
+			case "j":
+				m.monitorActionCursor = min(max(0, len(commands)-1), m.monitorActionCursor+1)
+				return m, nil
+			case "enter":
+				return m.activateMonitorAction()
+			}
+		} else if key == "l" || key == "right" {
+			m.monitorActionFocus = true
+			return m, nil
+		}
+	}
 
 	switch key {
 	case "q":
@@ -1223,6 +1297,13 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.helpOpen = true
 	case ",":
 		m.settingsOpen = true
+	case "o":
+		if m.height >= 16 {
+			m.activityOpen = true
+			m.activityCursor = 0
+		}
+	case "r":
+		return m.startMetadataRefresh()
 	case "/":
 		m.filtering = true
 	case "a":
@@ -1288,11 +1369,26 @@ func workspaceModes() []string {
 	return []string{"workbench", "console", "fleet"}
 }
 
+func workspaceLabel(name string) string {
+	switch normalizeWorkspaceMode(name) {
+	case "workbench":
+		return "Hosts"
+	case "console":
+		return "Monitor"
+	case "fleet":
+		return "Fleet"
+	default:
+		return "Hosts"
+	}
+}
+
 type settingsItem string
 
 const (
+	settingProfile          settingsItem = "profile"
 	settingTheme            settingsItem = "theme"
 	settingBackground       settingsItem = "background"
+	settingDensity          settingsItem = "density"
 	settingExperimentalTabs settingsItem = "experimental-tabs"
 	settingWorkspace        settingsItem = "workspace"
 	settingConfig           settingsItem = "config"
@@ -1300,8 +1396,10 @@ const (
 
 func settingsItems() []settingsItem {
 	return []settingsItem{
+		settingProfile,
 		settingTheme,
 		settingBackground,
+		settingDensity,
 		settingExperimentalTabs,
 		settingWorkspace,
 		settingConfig,
@@ -1313,6 +1411,11 @@ func (m dashboardModel) updateSetting(item settingsItem, direction int) (tea.Mod
 		return m, nil
 	}
 	switch item {
+	case settingProfile:
+		names := visualProfileNames()
+		name := cycleSettingValue(m.profile, names, direction)
+		m.settingsSaving = true
+		return m, m.saveSettingsCommand("profile", name, false)
 	case settingTheme:
 		if direction < 0 {
 			return m, nil
@@ -1325,6 +1428,10 @@ func (m dashboardModel) updateSetting(item settingsItem, direction int) (tea.Mod
 		}
 		m.settingsSaving = true
 		return m, m.saveSettingsCommand("background", background, false)
+	case settingDensity:
+		name := cycleSettingValue(m.density, []string{"adaptive", "compact", "comfortable"}, direction)
+		m.settingsSaving = true
+		return m, m.saveSettingsCommand("density", name, false)
 	case settingExperimentalTabs:
 		m.settingsSaving = true
 		return m, m.saveSettingsCommand("experimental_tabs", "", !m.experimentalTabs)
@@ -1343,6 +1450,20 @@ func (m dashboardModel) updateSetting(item settingsItem, direction int) (tea.Mod
 	return m, nil
 }
 
+func cycleSettingValue(current string, values []string, direction int) string {
+	index := 0
+	for candidate, value := range values {
+		if value == current {
+			index = candidate
+			break
+		}
+	}
+	if direction < 0 {
+		return values[(index+len(values)-1)%len(values)]
+	}
+	return values[(index+1)%len(values)]
+}
+
 func (m dashboardModel) workspaceTabsVisible() bool {
 	return m.experimentalTabs && m.width >= 150 && m.height >= 28
 }
@@ -1357,6 +1478,7 @@ func (m *dashboardModel) cycleWorkspace(delta int) {
 		}
 	}
 	m.workspace = names[(current+delta+len(names))%len(names)]
+	m.monitorActionFocus = false
 }
 
 func (m *dashboardModel) openWorkspacePreview() {
@@ -1393,6 +1515,10 @@ func (m dashboardModel) saveSettingsCommand(key, value string, enabled bool) tea
 		switch key {
 		case "background":
 			err = saveBackgroundToConfig(configPath, value)
+		case "profile":
+			err = saveVisualProfileToConfig(configPath, value)
+		case "density":
+			err = saveDensityToConfig(configPath, value)
 		case "experimental_tabs":
 			err = saveExperimentalTabsToConfig(configPath, enabled)
 		default:
@@ -1852,31 +1978,49 @@ func (m dashboardModel) View() string {
 	header := m.headerView(s)
 	footer := m.footerView(s)
 	bodyHeight := max(3, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
-
-	var body string
-	switch {
-	case m.width >= 150 && bodyHeight >= 24:
-		body = m.ultraWideView(s, m.width, bodyHeight)
-	case m.width >= 96:
-		hostWidth := min(48, max(38, m.width*38/100))
-		body = lipgloss.JoinHorizontal(lipgloss.Top,
-			fitTerminalView(m.hostListView(s, hostWidth, bodyHeight), hostWidth, bodyHeight),
-			fitTerminalView(m.detailView(s, m.width-hostWidth, bodyHeight), m.width-hostWidth, bodyHeight),
-		)
-	case m.width >= 72 && bodyHeight >= 18:
-		hostHeight := max(10, bodyHeight*3/5)
-		detailHeight := bodyHeight - hostHeight
+	workspaceHeight := bodyHeight
+	drawerHeight := 0
+	if m.activityOpen && bodyHeight >= 12 {
+		drawerHeight = min(12, max(7, bodyHeight/3))
+		workspaceHeight = max(3, bodyHeight-drawerHeight)
+	}
+	body := m.dashboardBodyView(s, m.width, workspaceHeight)
+	if drawerHeight > 0 {
 		body = lipgloss.JoinVertical(lipgloss.Left,
-			fitTerminalView(m.hostListView(s, m.width, hostHeight), m.width, hostHeight),
-			fitTerminalView(m.compactDetailView(s, m.width, detailHeight), m.width, detailHeight),
+			fitTerminalView(body, m.width, workspaceHeight),
+			fitTerminalView(m.activityDrawerView(s, m.width, drawerHeight), m.width, drawerHeight),
 		)
-	default:
-		body = m.compactView(s, m.width, bodyHeight)
 	}
 	body = fitTerminalView(body, m.width, bodyHeight)
 	return m.finishView(
 		lipgloss.JoinVertical(lipgloss.Left, header, body, footer),
 	)
+}
+
+func (m dashboardModel) dashboardBodyView(s dashboardStyles, width, bodyHeight int) string {
+	var body string
+	switch {
+	case m.workspaceTabsVisible() && bodyHeight >= 12:
+		body = m.ultraWideView(s, width, bodyHeight)
+	case width >= 150 && bodyHeight >= 24:
+		body = m.ultraWideView(s, width, bodyHeight)
+	case width >= 96:
+		hostWidth := min(48, max(38, width*38/100))
+		body = lipgloss.JoinHorizontal(lipgloss.Top,
+			fitTerminalView(m.hostListView(s, hostWidth, bodyHeight), hostWidth, bodyHeight),
+			fitTerminalView(m.detailView(s, width-hostWidth, bodyHeight), width-hostWidth, bodyHeight),
+		)
+	case width >= 72 && bodyHeight >= 18:
+		hostHeight := max(10, bodyHeight*3/5)
+		detailHeight := bodyHeight - hostHeight
+		body = lipgloss.JoinVertical(lipgloss.Left,
+			fitTerminalView(m.hostListView(s, width, hostHeight), width, hostHeight),
+			fitTerminalView(m.compactDetailView(s, width, detailHeight), width, detailHeight),
+		)
+	default:
+		body = m.compactView(s, width, bodyHeight)
+	}
+	return fitTerminalView(body, width, bodyHeight)
 }
 
 func (m dashboardModel) finishView(view string) string {
@@ -2031,6 +2175,16 @@ func extendedColorParameterCount(parameters []string) int {
 }
 
 func (m dashboardModel) ultraWideView(s dashboardStyles, width, height int) string {
+	if !m.experimentalTabs {
+		switch normalizeWorkspaceMode(m.workspace) {
+		case "console":
+			return m.classicConsoleWorkspaceView(s, width, height)
+		case "fleet":
+			return m.fleetWorkspaceView(s, width, height)
+		default:
+			return m.classicWorkbenchView(s, width, height)
+		}
+	}
 	switch normalizeWorkspaceMode(m.workspace) {
 	case "console":
 		return m.consoleWorkspaceView(s, width, height)
@@ -2041,11 +2195,10 @@ func (m dashboardModel) ultraWideView(s dashboardStyles, width, height int) stri
 	}
 }
 
-func (m dashboardModel) workspaceColumns(s dashboardStyles, width, height int) string {
-	contentWidth := width
-	hostWidth := min(42, max(38, contentWidth*24/100))
-	actionWidth := min(38, max(32, contentWidth*20/100))
-	detailWidth := max(56, contentWidth-hostWidth-actionWidth)
+func (m dashboardModel) classicWorkspaceColumns(s dashboardStyles, width, height int) string {
+	hostWidth := min(42, max(38, width*24/100))
+	actionWidth := min(38, max(32, width*20/100))
+	detailWidth := max(56, width-hostWidth-actionWidth)
 	return lipgloss.JoinHorizontal(lipgloss.Top,
 		fitTerminalView(m.hostListView(s, hostWidth, height), hostWidth, height),
 		fitTerminalView(m.detailView(s, detailWidth, height), detailWidth, height),
@@ -2053,22 +2206,23 @@ func (m dashboardModel) workspaceColumns(s dashboardStyles, width, height int) s
 	)
 }
 
-func (m dashboardModel) workbenchWorkspaceView(s dashboardStyles, width, height int) string {
+func (m dashboardModel) classicWorkbenchView(s dashboardStyles, width, height int) string {
 	deckHeight := min(16, max(9, height/4))
 	topHeight := max(1, height-deckHeight)
 	pulseWidth := max(64, width*3/5)
 	activityWidth := width - pulseWidth
-	top := m.workspaceColumns(s, width, topHeight)
+	top := m.classicWorkspaceColumns(s, width, topHeight)
 	deckBody := lipgloss.JoinHorizontal(lipgloss.Top,
 		fitTerminalView(m.telemetryView(s, pulseWidth, deckHeight), pulseWidth, deckHeight),
 		fitTerminalView(m.activityView(s, activityWidth, deckHeight), activityWidth, deckHeight),
 	)
 	deck := m.frameDeck(deckBody, width, deckHeight)
-	content := lipgloss.JoinVertical(lipgloss.Left, top, deck)
-	return lipgloss.NewStyle().Width(width).Height(height).Render(content)
+	return lipgloss.NewStyle().Width(width).Height(height).Render(
+		lipgloss.JoinVertical(lipgloss.Left, top, deck),
+	)
 }
 
-func (m dashboardModel) consoleWorkspaceView(s dashboardStyles, width, height int) string {
+func (m dashboardModel) classicConsoleWorkspaceView(s dashboardStyles, width, height int) string {
 	activityHeight := min(14, max(8, height/4))
 	consoleHeight := max(1, height-activityHeight)
 	hostWidth := min(42, max(36, width*24/100))
@@ -2078,8 +2232,76 @@ func (m dashboardModel) consoleWorkspaceView(s dashboardStyles, width, height in
 		fitTerminalView(m.consoleOutputView(s, consoleWidth, consoleHeight), consoleWidth, consoleHeight),
 	)
 	activity := m.frameDeck(m.activityView(s, width, max(1, activityHeight-1)), width, activityHeight)
-	return lipgloss.NewStyle().Width(width).Height(height).
-		Render(lipgloss.JoinVertical(lipgloss.Left, console, activity))
+	return lipgloss.NewStyle().Width(width).Height(height).Render(
+		lipgloss.JoinVertical(lipgloss.Left, console, activity),
+	)
+}
+
+func (m dashboardModel) workspaceColumns(s dashboardStyles, width, height int) string {
+	hostWidth := m.hostColumnWidth(width)
+	detailWidth := max(56, width-hostWidth)
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		fitTerminalView(m.hostListView(s, hostWidth, height), hostWidth, height),
+		fitTerminalView(m.detailView(s, detailWidth, height), detailWidth, height),
+	)
+}
+
+func (m dashboardModel) workbenchWorkspaceView(s dashboardStyles, width, height int) string {
+	actionHeight := 2
+	mainHeight := max(1, height-actionHeight)
+	main := m.workspaceColumns(s, width, mainHeight)
+	actions := fitTerminalView(m.hostActionBarView(s, width, actionHeight), width, actionHeight)
+	content := lipgloss.JoinVertical(lipgloss.Left, main, actions)
+	return lipgloss.NewStyle().Width(width).Height(height).Render(content)
+}
+
+func (m dashboardModel) consoleWorkspaceView(s dashboardStyles, width, height int) string {
+	actionWidth := m.monitorActionWidth(width)
+	monitorWidth := width - actionWidth
+	return lipgloss.NewStyle().Width(width).Height(height).Render(
+		lipgloss.JoinHorizontal(lipgloss.Top,
+			fitTerminalView(m.telemetryView(s, monitorWidth, height), monitorWidth, height),
+			fitTerminalView(m.monitorActionRailView(s, actionWidth, height), actionWidth, height),
+		),
+	)
+}
+
+func (m dashboardModel) hostColumnWidth(width int) int {
+	percentage, minimum, maximum := 25, 36, 44
+	switch m.density {
+	case "compact":
+		percentage, minimum, maximum = 22, 32, 40
+	case "comfortable":
+		percentage, minimum, maximum = 28, 40, 48
+	}
+	return min(maximum, max(minimum, width*percentage/100))
+}
+
+func (m dashboardModel) monitorActionWidth(width int) int {
+	percentage, minimum, maximum := 23, 32, 40
+	if m.density == "compact" {
+		percentage, minimum, maximum = 20, 30, 36
+	}
+	if m.density == "comfortable" {
+		percentage, minimum, maximum = 25, 36, 44
+	}
+	return min(maximum, max(minimum, width*percentage/100))
+}
+
+func (m dashboardModel) hostActionBarView(s dashboardStyles, width, height int) string {
+	hints := strings.Join([]string{
+		keyHint(s, "enter", "connect"),
+		keyHint(s, "a", "actions"),
+		keyHint(s, "r", "refresh"),
+		keyHint(s, "o", "activity"),
+	}, "  ")
+	host := truncateText(valueOr(displayName(m.selectedHost()), "No host selected"), max(12, width-lipgloss.Width(hints)-8))
+	gap := max(1, width-lipgloss.Width(hints)-lipgloss.Width(host)-4)
+	return m.renderPanel(
+		s.panel.BorderLeft(false).BorderRight(false).BorderBottom(false).
+			Width(max(1, width-2)).Height(max(1, height-1)).Padding(0, 1),
+		s.muted.Render(hints)+strings.Repeat(" ", gap)+s.focus.Render(host),
+	)
 }
 
 func (m dashboardModel) fleetWorkspaceView(s dashboardStyles, width, height int) string {
@@ -2134,10 +2356,113 @@ func (m dashboardModel) actionRailView(s dashboardStyles, width, height int) str
 	)
 }
 
+func (m dashboardModel) monitorActions() []dashboardCommand {
+	return []dashboardCommand{
+		{Label: "Connect", Description: "Open SSH session", Action: actionSSH},
+		{Label: "Refresh info", Description: "Update system details", Action: actionInfo},
+		{Label: "Storage", Description: "Inspect all volumes", Action: actionStorage},
+		{Label: "Check host", Description: "Refresh connection", Action: actionProbe},
+		{Label: "All actions", Description: "Commands and tools"},
+	}
+}
+
+func (m dashboardModel) monitorActionRailView(s dashboardStyles, width, height int) string {
+	lines := []string{
+		s.focus.Render("ACTIONS"),
+		s.muted.Render("Selected host"),
+		"",
+	}
+	commands := m.monitorActions()
+	cursor := min(max(0, m.monitorActionCursor), len(commands)-1)
+	for index, command := range commands {
+		label := truncateText(command.Label, max(1, width-6))
+		description := truncateText(command.Description, max(1, width-8))
+		if m.monitorActionFocus && index == cursor {
+			lines = append(lines,
+				s.selected.Render("› "+padCell(label, max(1, width-6))),
+				s.selectedMuted.Render("  "+padCell(description, max(1, width-6))),
+			)
+			continue
+		}
+		marker := "  "
+		if index == 0 {
+			marker = "◆ "
+		}
+		lines = append(lines, s.text.Render(marker+label), s.muted.Render("  "+description))
+	}
+	footer := "[l/→] focus · [a] all actions"
+	if m.monitorActionFocus {
+		footer = "j/k move · enter run · h/← back"
+	}
+	lines = append(lines, "", s.muted.Render(truncateText(footer, max(1, width-5))))
+	return m.renderPanel(
+		s.panel.BorderTop(false).BorderRight(false).BorderBottom(false).
+			Width(max(1, width-1)).Height(max(1, height)).Padding(1, 1),
+		strings.Join(lines, "\n"),
+	)
+}
+
+func (m dashboardModel) activateMonitorAction() (tea.Model, tea.Cmd) {
+	commands := m.monitorActions()
+	if len(commands) == 0 {
+		return m, nil
+	}
+	command := commands[min(max(0, m.monitorActionCursor), len(commands)-1)]
+	if command.Action == "" {
+		m.monitorActionFocus = false
+		m.commandOpen = true
+		m.commandCursor = 0
+		m.commandQuery = ""
+		return m, nil
+	}
+	if m.selectedTarget() == "" {
+		m.notice = "Select a host before running an action"
+		m.noticeError = false
+		return m, nil
+	}
+	usageCmd := m.recordActionUsage(command.Action, command.Command)
+	switch command.Action {
+	case actionSSH:
+		m.monitorActionFocus = false
+		return m.startTerminalAction(dashboardSelection{Action: actionSSH, Host: m.selectedTarget()}, usageCmd)
+	case actionInfo:
+		updated, commandCmd := m.startMetadataRefresh()
+		return updated, tea.Batch(usageCmd, commandCmd)
+	case actionStorage:
+		m.monitorActionFocus = false
+		m.commandRunning = true
+		m.commandOffset = 0
+		m.commandResult = &configuredCommandResult{
+			Action: actionStorage,
+			Host:   m.selectedTarget(),
+			Command: commandConfig{
+				Name: "Storage", Description: "Mounted storage volumes",
+			},
+		}
+		m.startOperation(actionStorage, "Storage", m.selectedTarget())
+		return m, tea.Batch(usageCmd, m.storageCommandCmd(m.selectedTarget(), m.operationID))
+	case actionProbe:
+		target := m.selectedTarget()
+		if target != "" && !m.probing {
+			m.startOperation(actionProbe, "Check host", target)
+			m.operationProbeID = m.operationID
+			m, commandCmd := m.beginProbe([]string{target})
+			return m, tea.Batch(usageCmd, commandCmd)
+		}
+		return m, usageCmd
+	default:
+		return m, usageCmd
+	}
+}
+
 func (m dashboardModel) telemetryView(s dashboardStyles, width, height int) string {
 	host := m.selectedHost()
 	entry := m.telemetry[host.Target]
-	lines := []string{s.focus.Render("HOST PULSE")}
+	title := "HOST PULSE"
+	if m.experimentalTabs {
+		title = "LIVE MONITOR"
+	}
+	lines := []string{s.focus.Render(title)}
 	if host.Target == "" {
 		lines = append(lines, s.muted.Render("Select a host to begin sampling."))
 	} else if entry.Current.CollectedAt.IsZero() {
@@ -2250,6 +2575,90 @@ func (m dashboardModel) activityView(s dashboardStyles, width, height int) strin
 	)
 }
 
+func (m dashboardModel) activityDrawerEvents() []activityEvent {
+	events := make([]activityEvent, 0, len(m.activities)+1)
+	if m.operation != nil && m.operation.Status == "running" {
+		events = append(events, activityEvent{
+			Label: m.operation.Label, Host: m.operation.Host, Status: "running",
+			Summary: "Running " + compactDuration(time.Since(m.operation.StartedAt)),
+			Output:  m.operation.Output,
+		})
+	}
+	for index := len(m.activities) - 1; index >= 0; index-- {
+		events = append(events, m.activities[index])
+	}
+	if len(events) == 0 && m.operation != nil && m.operationPersisted {
+		events = append(events, activityEvent{
+			Label: m.operation.Label, Host: m.operation.Host, Status: m.operation.Status,
+			Summary: m.operation.Summary, Output: m.operation.Output, Duration: m.operation.Duration,
+		})
+	}
+	return events
+}
+
+func (m dashboardModel) activityDrawerView(s dashboardStyles, width, height int) string {
+	events := m.activityDrawerEvents()
+	innerWidth := max(1, width-4)
+	lines := []string{
+		s.focus.Render("ACTIVITY") + s.muted.Render("  operations · newest first"),
+	}
+	if len(events) == 0 {
+		lines = append(lines,
+			"",
+			s.text.Render("No operations yet."),
+			s.muted.Render("Run an action and its result will appear here."),
+		)
+	} else {
+		cursor := min(max(0, m.activityCursor), len(events)-1)
+		rowBudget := max(1, min(len(events), height-5))
+		start, end := selectionWindow(len(events), cursor, rowBudget)
+		for index := start; index < end; index++ {
+			event := events[index]
+			icon, status := "✓", s.success
+			switch event.Status {
+			case "running":
+				icon, status = "◌", s.warning
+			case "error":
+				icon, status = "×", s.failure
+			}
+			subject := event.Label
+			if event.Host != "" {
+				subject += " · " + event.Host
+			}
+			detail := valueOr(event.Summary, compactDuration(event.Duration))
+			row := icon + " " + truncateText(subject, max(10, innerWidth-lipgloss.Width(detail)-4))
+			gap := max(1, innerWidth-lipgloss.Width(row)-lipgloss.Width(detail))
+			row += strings.Repeat(" ", gap) + detail
+			if index == cursor {
+				lines = append(lines, s.selected.Render(padCell(truncateText("› "+row, innerWidth), innerWidth)))
+			} else {
+				lines = append(lines, status.Render("  "+truncateText(row, max(1, innerWidth-2))))
+			}
+		}
+		selected := events[cursor]
+		preview := selected.Output
+		if strings.TrimSpace(preview) == "" {
+			preview = valueOr(selected.Summary, "No captured output")
+		}
+		if len(lines) < height-2 {
+			label := "OUTPUT · " + selected.Label
+			lines = append(lines, s.muted.Render(truncateText(label, innerWidth)))
+			for _, line := range tailNonEmptyLines(preview, max(1, height-len(lines)-1)) {
+				lines = append(lines, s.text.Render(truncateText(line, innerWidth)))
+			}
+		}
+	}
+	footer := "[j/k] move   [o/esc] close"
+	if len(lines) < height {
+		lines = append(lines, s.muted.Render(truncateText(footer, innerWidth)))
+	}
+	return m.renderPanel(
+		s.panel.BorderLeft(false).BorderRight(false).BorderBottom(false).
+			Width(max(1, width-2)).Height(max(1, height-1)).Padding(0, 1),
+		strings.Join(lines, "\n"),
+	)
+}
+
 func (m dashboardModel) consoleOutputView(s dashboardStyles, width, height int) string {
 	lines := []string{s.focus.Render("OPERATIONS CONSOLE")}
 	if m.operation == nil {
@@ -2286,7 +2695,7 @@ func (m dashboardModel) consoleOutputView(s dashboardStyles, width, height int) 
 func (m dashboardModel) fleetDeckView(s dashboardStyles, width, height int) string {
 	lines := []string{
 		s.focus.Render("FLEET WORKSPACE"),
-		s.muted.Render("Cached inventory with explicit freshness · selected-host telemetry stays local to the workbench"),
+		s.muted.Render("Cached inventory with explicit freshness · selected-host telemetry stays in Monitor"),
 		"",
 	}
 	nameWidth := min(28, max(16, width/6))
@@ -2503,7 +2912,7 @@ func (m dashboardModel) workspaceTabs(s dashboardStyles) string {
 	active := normalizeWorkspaceMode(m.workspace)
 	tabs := make([]string, 0, len(workspaceModes()))
 	for _, name := range workspaceModes() {
-		label := strings.ToUpper(name)
+		label := strings.ToUpper(workspaceLabel(name))
 		if name == active {
 			tabs = append(tabs, s.key.Render(label))
 			continue
@@ -2544,7 +2953,13 @@ func (m dashboardModel) hostListView(s dashboardStyles, width, height int) strin
 			s.muted.Render("Backspace to broaden · esc to clear"),
 		)
 	} else {
-		rows := max(1, (height-6)/2)
+		rowHeight := 2
+		if m.density == "compact" {
+			rowHeight = 1
+		} else if m.density == "comfortable" {
+			rowHeight = 3
+		}
+		rows := max(1, (height-6)/rowHeight)
 		start := 0
 		if m.cursor >= rows {
 			start = m.cursor - rows + 1
@@ -2586,6 +3001,22 @@ func (m dashboardModel) hostRow(s dashboardStyles, host dashboardHost, width int
 		name = target.Host
 	}
 	status := m.statusText(s, host.Reachability)
+	if m.density == "compact" {
+		identity := name
+		if host.Alias == "" {
+			identity = host.Target
+		}
+		identity = truncateText(identity, max(8, width-lipgloss.Width(status)-3))
+		gap := max(1, width-lipgloss.Width(identity)-lipgloss.Width(status)-2)
+		row := identity + strings.Repeat(" ", gap) + status
+		if selected {
+			plainStatus := plainReachability(host.Reachability, m.probeTargets[host.Target])
+			identity = truncateText(identity, max(8, width-lipgloss.Width(plainStatus)-3))
+			gap = max(1, width-lipgloss.Width(identity)-lipgloss.Width(plainStatus)-2)
+			return s.selected.Render("› " + padCell(identity+strings.Repeat(" ", gap)+plainStatus, width-2))
+		}
+		return s.text.Render("  " + row)
+	}
 	firstName := truncateText(name, max(8, width-lipgloss.Width(status)-3))
 	firstGap := max(1, width-lipgloss.Width(firstName)-lipgloss.Width(status)-2)
 	first := "  " + firstName + strings.Repeat(" ", firstGap) + status
@@ -2611,7 +3042,11 @@ func (m dashboardModel) hostRow(s dashboardStyles, host dashboardHost, width int
 		first = s.text.Render(first)
 		second = s.muted.Render(second)
 	}
-	return first + "\n" + second
+	row := first + "\n" + second
+	if m.density == "comfortable" {
+		row += "\n"
+	}
+	return row
 }
 
 func (m dashboardModel) statusText(s dashboardStyles, result reachabilityResult) string {
@@ -2776,17 +3211,18 @@ func (m dashboardModel) compactView(s dashboardStyles, width, height int) string
 
 func (m dashboardModel) footerView(s dashboardStyles) string {
 	hintItems := []string{
-		keyHint(s, "enter", "connect"),
-		keyHint(s, "j/k", "move"),
-		keyHint(s, "/", "find"),
-		keyHint(s, "a", "actions"),
+		keyHint(s, "enter", "connect"), keyHint(s, "j/k", "move"),
+		keyHint(s, "/", "find"), keyHint(s, "a", "actions"), keyHint(s, "o", "activity"),
 	}
 	if m.workspaceTabsVisible() {
-		hintItems[1] = keyHint(s, "tab", "workspace")
+		hintItems = []string{
+			keyHint(s, "tab", "switch tab"), keyHint(s, "←/→", "navigate"),
+			keyHint(s, ",", "settings"), keyHint(s, "h", "keys"),
+		}
 	}
 	hints := strings.Join(hintItems, "  ")
 	if m.width < 72 {
-		hints = "enter · j/k · / find · a actions · h keys"
+		hints = "enter · j/k · / find · a actions · o activity"
 		if m.width < 48 {
 			hints = "enter connect · a actions · h keys"
 		}
@@ -3135,12 +3571,12 @@ func (m dashboardModel) workspacePreviewView() string {
 	innerWidth := m.overlayContentWidth(width)
 	contentHeight := m.overlayContentHeight()
 	lines := []string{
-		s.focus.Render("WORKSPACE"),
-		s.muted.Render(truncateText("Choose how large terminals use available space", innerWidth)),
+		s.focus.Render("CLASSIC WORKSPACE"),
+		s.muted.Render(truncateText("Choose the large-terminal view used while tabs are off", innerWidth)),
 	}
 	descriptions := map[string]string{
-		"workbench": "Host pulse, storage pressure, actions, and activity",
-		"console":   "Give remote output and recent operations more room",
+		"workbench": "Hosts and focused system details",
+		"console":   "Selected-host monitoring and contextual actions",
 		"fleet":     "Compare cached facts and freshness across every host",
 	}
 	footer := "[j/k] preview   [enter] use once   [s] save   [esc] back"
@@ -3162,7 +3598,7 @@ func (m dashboardModel) workspacePreviewView() string {
 	start, end := selectionWindow(len(names), m.workspaceCursor, rowBudget)
 	for index := start; index < end; index++ {
 		name := names[index]
-		line := truncateText(fmt.Sprintf("%-12s %s", name, descriptions[name]), max(1, innerWidth-2))
+		line := truncateText(fmt.Sprintf("%-12s %s", workspaceLabel(name), descriptions[name]), max(1, innerWidth-2))
 		if index == m.workspaceCursor {
 			line = s.selected.Render("› " + padCell(line, max(1, innerWidth-2)))
 		} else {
@@ -3184,9 +3620,11 @@ func (m dashboardModel) settingsView() string {
 	contentHeight := m.overlayContentHeight()
 	items := settingsItems()
 	values := map[settingsItem]string{
+		settingProfile:    strings.ToUpper(m.profile),
 		settingTheme:      m.theme.Name,
 		settingBackground: strings.ToUpper(loadedConfig.UI.Background),
-		settingWorkspace:  strings.ToUpper(normalizeWorkspaceMode(m.workspace)),
+		settingDensity:    strings.ToUpper(m.density),
+		settingWorkspace:  strings.ToUpper(workspaceLabel(m.workspace)),
 		settingConfig:     "OPEN IN EDITOR",
 	}
 	if m.experimentalTabs {
@@ -3195,10 +3633,12 @@ func (m dashboardModel) settingsView() string {
 		values[settingExperimentalTabs] = "○ OFF · EXPERIMENTAL"
 	}
 	details := map[settingsItem]string{
+		settingProfile:          "Apply a coordinated theme, contrast, and density preset; customize anything afterward.",
 		settingTheme:            "Preview palettes live, then use once or save the default.",
 		settingBackground:       "Opaque paints every cell; transparent preserves the terminal canvas.",
-		settingExperimentalTabs: "Prototype tab strip for terminals at least 150 columns wide.",
-		settingWorkspace:        "Choose the large-terminal layout used for this session or by default.",
+		settingDensity:          "Adaptive follows the terminal; Compact and Comfortable override its rhythm.",
+		settingExperimentalTabs: "Optional Hosts, Monitor, and Fleet navigation for wide terminals.",
+		settingWorkspace:        "Choose the large-terminal view used when tabbed mode is off.",
 		settingConfig:           "Exit Nexus and open the YAML configuration in your editor.",
 	}
 
@@ -3216,7 +3656,7 @@ func (m dashboardModel) settingsView() string {
 		item := items[index]
 		if !compact {
 			switch item {
-			case settingTheme:
+			case settingProfile:
 				lines = append(lines, "", s.focus.Render("APPEARANCE"))
 			case settingExperimentalTabs:
 				lines = append(lines, "", s.focus.Render("NAVIGATION"))
@@ -3225,10 +3665,12 @@ func (m dashboardModel) settingsView() string {
 			}
 		}
 		label := map[settingsItem]string{
+			settingProfile:          "Visual profile",
 			settingTheme:            "Theme",
 			settingBackground:       "Background",
+			settingDensity:          "Density",
 			settingExperimentalTabs: "Workspace tabs",
-			settingWorkspace:        "Default workspace",
+			settingWorkspace:        "Classic workspace",
 			settingConfig:           "Configuration file",
 		}[item]
 		lines = append(lines, settingsRow(s, label, values[item], index == m.settingsCursor, innerWidth))
@@ -3523,13 +3965,14 @@ func (m dashboardModel) helpView() string {
 		compact := []string{
 			s.focus.Render("NEXUS KEYS"),
 			truncateText("↑/↓ j/k · enter connect", innerWidth),
-			truncateText("/ find · a actions · , settings", innerWidth),
+			truncateText("/ find · a actions · r refresh", innerWidth),
+			truncateText("o activity · , settings", innerWidth),
 			truncateText("h keys · q quit", innerWidth),
 			truncateText("lists: arrows or j/k · enter choose", innerWidth),
 			s.muted.Render(truncateText("esc closes this view", innerWidth)),
 		}
 		if m.experimentalTabs {
-			compact = append(compact[:2], append([]string{truncateText("tab workspace on wide screens", innerWidth)}, compact[2:]...)...)
+			compact = append(compact[:2], append([]string{truncateText("tab Hosts · Monitor · Fleet", innerWidth)}, compact[2:]...)...)
 		}
 		return m.overlayPanel(s, width, compact)
 	}
@@ -3541,11 +3984,14 @@ func (m dashboardModel) helpView() string {
 		"enter        connect with SSH",
 		"/            find hosts",
 		"a            all actions and saved commands",
+		"r            refresh selected host details",
+		"o            open or close Activity",
 		",            open settings",
 		"h            open this key reference",
 		"q            quit Nexus",
 		"",
 		"LISTS         arrows or j/k move · enter choose · esc back",
+		"MONITOR       l/right focus actions · h/left return",
 		"ACTION FILTER / start · backspace edit · enter first match",
 		"THEME         s save default",
 		"FAILED SCAN   r retry",
@@ -3556,7 +4002,7 @@ func (m dashboardModel) helpView() string {
 		"● online   ! refused   × unavailable   ◌ checking",
 	}
 	if m.experimentalTabs {
-		help = append(help[:5], append([]string{"tab          cycle workspace tabs on wide screens"}, help[5:]...)...)
+		help = append(help[:5], append([]string{"tab          cycle Hosts, Monitor, and Fleet"}, help[5:]...)...)
 	}
 	return m.overlayPanel(s, width, help)
 }

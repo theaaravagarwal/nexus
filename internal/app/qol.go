@@ -81,8 +81,9 @@ func (a *app) newDoctorCmd() *cobra.Command {
 				stateStatus = "invalid: " + sanitizeTerminalText(err.Error())
 			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-				"config   %s (%s)\nhistory  %s\nstate    %s (%s)\ntheme    %s\nworkspace %s\ntabs     %t\npins     %d configured, %d unresolved\n",
-				a.configFile, configMode, a.hostsFile, a.stateFile, stateStatus, activeTheme().Name,
+				"config   %s (%s)\nhistory  %s\nstate    %s (%s)\nprofile  %s\ntheme    %s\ndensity  %s\nworkspace %s\ntabs     %t\npins     %d configured, %d unresolved\n",
+				a.configFile, configMode, a.hostsFile, a.stateFile, stateStatus,
+				loadedConfig.UI.Profile, activeTheme().Name, loadedConfig.UI.Density,
 				loadedConfig.UI.Workspace, loadedConfig.UI.ExperimentalTabs,
 				len(loadedConfig.UI.PinnedActions), len(unresolvedPinnedActions(loadedConfig)))
 			if requiredMissing {

@@ -152,9 +152,11 @@ nexus --port 2200 ssh user@example-host
 |---|---|
 | `↑` / `↓` or `j` / `k` | Select a host or move within a list |
 | `enter` | Connect, or choose the selected list item |
-| `tab` / `shift+tab` | Cycle wide-screen workspace tabs when the experimental option is enabled |
+| `tab` / `shift+tab` | Cycle optional Hosts, Monitor, and Fleet tabs on wide terminals |
 | `/` | Find hosts; inside Actions, filter the action list |
 | `a` | Open every operation and saved command |
+| `r` | Refresh details for the selected host |
+| `o` | Open or close the Activity drawer |
 | `,` | Open Settings |
 | `h` | Open the complete contextual key reference |
 | `esc` | Go back or cancel the current context |
@@ -181,13 +183,17 @@ Default config template:
 full_index_depth: 5
 
 ui:
+  # calm | signal | terminal
+  profile: calm
   # Run nexus theme list for every built-in palette.
   theme: nexus
   # opaque paints the theme background; transparent preserves your terminal.
   background: opaque
+  # adaptive | compact | comfortable
+  density: adaptive
   # workbench | console | fleet
   workspace: workbench
-  # Prototype tabs appear only on terminals at least 150 columns wide.
+  # Optional Hosts, Monitor, and Fleet tabs appear on wide terminals.
   experimental_tabs: false
   pinned_actions: [ssh, info, storage]
 
@@ -234,8 +240,8 @@ How to use the config:
 3. Under `host_profiles`, use the full saved target when profiles differ by user or port.
 4. Save and return to Nexus; aliases, tags, and commands reload automatically.
 
-Press `,` or choose **Settings** from Actions to manage themes, background,
-the default workspace, and the optional workspace-tab prototype. Theme and
+Press `,` or choose **Settings** from Actions to manage visual profiles, themes,
+density, background, the classic workspace, and optional tabbed navigation. Theme and
 workspace pickers support arrows or `j/k`; press `enter` to use one for the
 session or `s` to save it as the default. `ui.pinned_actions` accepts stable built-in IDs and `command:<id>`;
 configured pins lead in exact order, followed by frequency-ranked actions.
@@ -255,10 +261,12 @@ nexus theme preview   # preview every built-in theme
 Config keys:
 
 - `full_index_depth`: max depth used in `--indexing full` mode.
+- `ui.profile`: `calm`, `signal`, or `terminal`; each preset remains customizable.
 - `ui.theme`: run `nexus theme list` for the twenty built-in palettes.
 - `ui.background`: `opaque` or `transparent`.
+- `ui.density`: `adaptive`, `compact`, or `comfortable`.
 - `ui.workspace`: `workbench`, `console`, or `fleet`.
-- `ui.experimental_tabs`: shows the prototype workspace tab strip on wide terminals.
+- `ui.experimental_tabs`: shows Hosts, Monitor, and Fleet navigation on wide terminals.
 - `ui.pinned_actions`: ordered built-in IDs or `command:<id>` references.
 - `ui.colors`: optional semantic overrides such as `focus` and `live`.
 - `reachability.*`: bounds saved-target DNS/TCP checks; these are not SSH/login latency checks.
