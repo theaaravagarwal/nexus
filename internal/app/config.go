@@ -23,14 +23,16 @@ type commandConfig struct {
 }
 
 type uiConfig struct {
-	Theme            string            `yaml:"theme"`
-	Background       string            `yaml:"background"`
-	Profile          string            `yaml:"profile,omitempty"`
-	Density          string            `yaml:"density,omitempty"`
-	Workspace        string            `yaml:"workspace,omitempty"`
-	ExperimentalTabs bool              `yaml:"experimental_tabs,omitempty"`
-	PinnedActions    []string          `yaml:"pinned_actions,omitempty"`
-	Colors           map[string]string `yaml:"colors,omitempty"`
+	Theme                 string            `yaml:"theme"`
+	Background            string            `yaml:"background"`
+	Profile               string            `yaml:"profile,omitempty"`
+	Density               string            `yaml:"density,omitempty"`
+	Workspace             string            `yaml:"workspace,omitempty"`
+	ExperimentalTabs      bool              `yaml:"experimental_tabs,omitempty"`
+	MonitorBtop           *bool             `yaml:"monitor_btop,omitempty"`
+	ExperimentalFleetBtop bool              `yaml:"experimental_fleet_btop,omitempty"`
+	PinnedActions         []string          `yaml:"pinned_actions,omitempty"`
+	Colors                map[string]string `yaml:"colors,omitempty"`
 }
 
 type reachabilityConfig struct {
@@ -66,12 +68,13 @@ func defaultAppConfig() appConfig {
 	return appConfig{
 		FullIndexDepth: defaultFullIndexDepth,
 		UI: uiConfig{
-			Theme:         "nexus",
-			Background:    "opaque",
-			Profile:       "calm",
-			Density:       "adaptive",
-			Workspace:     "workbench",
-			PinnedActions: []string{"ssh", "info", "storage"},
+			Theme:                 "nexus",
+			Background:            "opaque",
+			Profile:               "calm",
+			Density:               "adaptive",
+			Workspace:             "workbench",
+			ExperimentalFleetBtop: true,
+			PinnedActions:         []string{"ssh", "info", "storage"},
 		},
 		Reachability: reachabilityConfig{
 			Enabled:      &enabled,
@@ -83,6 +86,13 @@ func defaultAppConfig() appConfig {
 		TagCommands:  map[string][]commandConfig{},
 		HostProfiles: map[string]discoveryProfile{},
 	}
+}
+
+func (cfg uiConfig) monitorBtopEnabled() bool {
+	if cfg.MonitorBtop != nil {
+		return *cfg.MonitorBtop
+	}
+	return cfg.ExperimentalFleetBtop
 }
 
 func ensureConfigFile(configPath string) error {
@@ -130,6 +140,8 @@ ui:
   workspace: workbench
   # Prototype: show keyboard-switchable workspace tabs on wide terminals.
   experimental_tabs: false
+  # Show the selected host's compressed live btop terminal in Monitor.
+  monitor_btop: true
   # Stable built-in IDs or command:<id>. Pins stay in this exact order.
   pinned_actions:
     - ssh
@@ -284,6 +296,17 @@ func saveExperimentalTabsToConfig(configPath string, enabled bool) error {
 	return saveUIScalar(configPath, "experimental_tabs", "!!bool", strconv.FormatBool(enabled))
 }
 
+func saveExperimentalFleetBtopToConfig(configPath string, enabled bool) error {
+	return saveMonitorBtopToConfig(configPath, enabled)
+}
+
+func saveMonitorBtopToConfig(configPath string, enabled bool) error {
+	return saveUIValuesRemoving(configPath,
+		map[string]uiScalarValue{"monitor_btop": {Tag: "!!bool", Value: strconv.FormatBool(enabled)}},
+		[]string{"experimental_fleet_btop"},
+	)
+}
+
 func saveDensityToConfig(configPath, density string) error {
 	density = normalizeUIDensity(density)
 	if density == "" {
@@ -319,6 +342,10 @@ type uiScalarValue struct {
 }
 
 func saveUIValues(configPath string, values map[string]uiScalarValue) error {
+	return saveUIValuesRemoving(configPath, values, nil)
+}
+
+func saveUIValuesRemoving(configPath string, values map[string]uiScalarValue, remove []string) error {
 	if configPath == "" {
 		return errors.New("config path is empty")
 	}
@@ -347,6 +374,9 @@ func saveUIValues(configPath string, values map[string]uiScalarValue) error {
 	}
 	if ui.Kind != yaml.MappingNode {
 		return fmt.Errorf("invalid config YAML %s: ui must be a mapping", configPath)
+	}
+	for _, key := range remove {
+		removeMappingKey(ui, key)
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -381,6 +411,16 @@ func saveUIValues(configPath string, values map[string]uiScalarValue) error {
 		return fmt.Errorf("failed to save UI setting: %w", err)
 	}
 	return nil
+}
+
+func removeMappingKey(mapping *yaml.Node, key string) {
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value != key {
+			continue
+		}
+		mapping.Content = append(mapping.Content[:index], mapping.Content[index+2:]...)
+		return
+	}
 }
 
 func mappingValue(mapping *yaml.Node, key string) *yaml.Node {

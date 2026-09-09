@@ -510,6 +510,265 @@ func TestDashboardTabbedModeAlwaysStartsOnHosts(t *testing.T) {
 	}
 }
 
+func TestDashboardMonitorShowsSelectedHostLiveBtop(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.experimentalTabs = true
+	model.experimentalFleetBtop = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+	model.hosts[0].Reachability = reachabilityResult{Target: "alice@one", Status: reachOnline, Latency: 12 * time.Millisecond}
+	model.telemetry["alice@one"] = hostTelemetry{Current: telemetrySample{
+		Target: "alice@one", CollectedAt: time.Now(), Uptime: time.Hour,
+		BtopInstalled: true,
+		BtopFrame:     "┌─ cpu ─────────┐\n│ 87% render-worker │\n├─ proc ────────┤\n│ 42 alice      │\n└───────────────┘",
+	}}
+	view := model.View()
+	for _, want := range []string{"LIVE MONITOR", "BTOP", "cpu", "proc", "render-worker", "[r] reconnect"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Monitor live btop missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestDashboardMonitorBtopIsOnByDefaultAndUsesBottomPane(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 150, 28
+	model.hosts[0].Reachability.Status = reachOnline
+	model.telemetry["alice@one"] = hostTelemetry{Current: telemetrySample{
+		CollectedAt: time.Now(), BtopInstalled: true,
+		BtopFrame: "┌─ proc ─┐\n│ worker │\n└────────┘",
+	}}
+	view := model.View()
+	if !model.experimentalFleetBtop || !strings.Contains(view, "BTOP") || !strings.Contains(view, "worker") {
+		t.Fatalf("Monitor btop was not enabled by default:\n%s", view)
+	}
+	lines := strings.Split(view, "\n")
+	monitorLine, btopLine := -1, -1
+	for index, line := range lines {
+		if strings.Contains(line, "LIVE MONITOR") {
+			monitorLine = index
+		}
+		if strings.Contains(line, "BTOP") {
+			btopLine = index
+		}
+	}
+	if monitorLine < 0 || btopLine <= monitorLine {
+		t.Fatalf("btop was not placed below Monitor summary: monitor=%d btop=%d\n%s", monitorLine, btopLine, view)
+	}
+}
+
+func TestDashboardFleetSelectionWindowKeepsSelectedHostVisible(t *testing.T) {
+	hosts := make([]string, 0, 50)
+	for index := 0; index < 50; index++ {
+		hosts = append(hosts, fmt.Sprintf("user@host-%02d", index))
+	}
+	model := newDashboardModel(hosts)
+	model.plain = true
+	model.experimentalTabs = true
+	model.workspace = "fleet"
+	model.width, model.height = 150, 28
+	model.cursor = len(model.filtered) - 1
+	view := model.View()
+	if !strings.Contains(view, "› host-49") || !strings.Contains(view, "/ 50 hosts") {
+		t.Fatalf("selected Fleet host was outside the visible window:\n%s", view)
+	}
+}
+
+func TestDashboardMonitorHostSwitchChangesLiveBtop(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one", "bob@two"})
+	model.plain = true
+	model.experimentalTabs = true
+	model.experimentalFleetBtop = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+	for index := range model.hosts {
+		model.hosts[index].Reachability.Status = reachOnline
+	}
+	now := time.Now()
+	model.telemetry["alice@one"] = hostTelemetry{Current: telemetrySample{
+		CollectedAt: now, BtopInstalled: true, BtopFrame: "┌ process-one ┐",
+	}}
+	model.telemetry["bob@two"] = hostTelemetry{Current: telemetrySample{
+		CollectedAt: now, BtopInstalled: true, BtopFrame: "┌ process-two ┐",
+	}}
+	previousGeneration := model.telemetryGen
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = updated.(dashboardModel)
+	view := model.View()
+	if cmd == nil || model.telemetryGen <= previousGeneration || model.selectedTarget() != "bob@two" ||
+		!strings.Contains(view, "process-two") || strings.Contains(view, "process-one") {
+		t.Fatalf("Monitor live btop did not follow selection:\n%s", view)
+	}
+}
+
+func TestDashboardMonitorBtopUsesAFullResponsiveViewportOnlyWhileVisible(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.width, model.height = 180, 40
+	model.workspace = "console"
+	columns, rows, ok := model.monitorBtopViewport()
+	if !ok || columns < btopMinColumns || rows < btopMinRows {
+		t.Fatalf("Monitor btop viewport=(%d,%d,%t)", columns, rows, ok)
+	}
+	_, workspaceHeight, _ := model.dashboardHeights()
+	_, btopHeight := monitorPaneHeights(workspaceHeight)
+	wantColumns, wantRows := btopFrameViewport(
+		model.width-model.monitorActionWidth(model.width), btopHeight, false, true,
+	)
+	if columns != wantColumns || rows != wantRows {
+		t.Fatalf("Monitor PTY=%dx%d, visible frame=%dx%d", columns, rows, wantColumns, wantRows)
+	}
+	model.workspace = "workbench"
+	if _, _, ok := model.monitorBtopViewport(); ok {
+		t.Fatal("hidden Monitor btop retained a streaming viewport")
+	}
+}
+
+func TestDashboardMonitorBtopBottomRowRemainsVisible(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+	columns, rows, ok := model.monitorBtopViewport()
+	if !ok {
+		t.Fatal("expected a visible Monitor btop viewport")
+	}
+	frameLines := make([]string, rows)
+	for index := range frameLines {
+		frameLines[index] = strings.Repeat(".", min(columns, 12))
+	}
+	frameLines[rows-1] = "BTOP-BOTTOM-ROW"
+	model.btopStreamState = "live"
+	model.btopStreamUpdatedAt = time.Now()
+	model.telemetry["alice@one"] = hostTelemetry{Current: telemetrySample{
+		Target: "alice@one", CollectedAt: time.Now(), BtopInstalled: true,
+		BtopFrame: strings.Join(frameLines, "\n"),
+	}}
+	view := model.View()
+	if !strings.Contains(view, "BTOP-BOTTOM-ROW") {
+		t.Fatalf("Monitor clipped btop's bottom row:\n%s", view)
+	}
+	assertTerminalBounds(t, view, model.width, model.height, "Monitor btop exact fit")
+}
+
+func TestDashboardChromeHeightMatchesMonitorGeometry(t *testing.T) {
+	for _, width := range []int{40, 100, 180} {
+		model := newDashboardModel([]string{"alice@one"})
+		model.width, model.height = width, 40
+		s := model.styles()
+		got := lipgloss.Height(model.headerView(s)) + lipgloss.Height(model.footerView(s))
+		if got != dashboardChromeRows {
+			t.Fatalf("width=%d chrome rows=%d, geometry reserves %d", width, got, dashboardChromeRows)
+		}
+	}
+}
+
+func TestDashboardMonitorBtopAccountsForActivityDrawer(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 68
+	withoutDrawerColumns, withoutDrawerRows, ok := model.monitorBtopViewport()
+	if !ok {
+		t.Fatal("expected Monitor btop without Activity drawer")
+	}
+	model.activityOpen = true
+	withDrawerColumns, withDrawerRows, ok := model.monitorBtopViewport()
+	if !ok {
+		t.Fatal("expected Monitor btop with Activity drawer")
+	}
+	if withDrawerColumns != withoutDrawerColumns || withDrawerRows >= withoutDrawerRows {
+		t.Fatalf("drawer viewport=%dx%d, base=%dx%d", withDrawerColumns, withDrawerRows, withoutDrawerColumns, withoutDrawerRows)
+	}
+}
+
+func TestDashboardResizeDebouncesRemoteViewportRestart(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+	columns, rows, ok := model.monitorBtopViewport()
+	if !ok {
+		t.Fatal("expected initial Monitor btop viewport")
+	}
+	pool := newBtopStreamPool()
+	cancelled := false
+	pool.active = "alice@one"
+	pool.sessions["alice@one"] = &pooledBtopStream{
+		target: "alice@one", generation: 7, columns: columns, rows: rows,
+		running: true, cancel: func() { cancelled = true },
+	}
+	model.btopStreamPool = pool
+	model.btopStreamTarget = "alice@one"
+	model.btopStreamGeneration = 7
+	model.btopStreamColumns = columns
+	model.btopStreamRows = rows
+	t.Cleanup(model.closeBtopStreams)
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 190, Height: 45})
+	model = updated.(dashboardModel)
+	if command == nil || !model.btopResizePending || model.btopResizeGeneration != 1 {
+		t.Fatalf("resize did not enter debounce state: %#v", model)
+	}
+	if cancelled || len(pool.sessions) != 1 {
+		t.Fatal("resize restarted the remote terminal before its viewport settled")
+	}
+}
+
+func TestDashboardMonitorBtopWaitsForACompleteMinimumViewport(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 31
+	if columns, rows, ok := model.monitorBtopViewport(); ok {
+		t.Fatalf("undersized btop viewport started at %dx%d", columns, rows)
+	}
+	model.height = 32
+	if columns, rows, ok := model.monitorBtopViewport(); !ok || columns < 80 || rows < 24 {
+		t.Fatalf("complete btop viewport unavailable at %dx%d (%t)", columns, rows, ok)
+	}
+}
+
+func TestDashboardProcessGlanceDistinguishesSnapshotStates(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.hosts[0].Reachability.Status = reachOnline
+	s := model.styles()
+
+	model.btopStreamState = "connecting"
+	waiting := model.btopPaneView(s, 80, 16)
+	if !strings.Contains(waiting, "CONNECTING") || !strings.Contains(waiting, "live remote terminal") {
+		t.Fatalf("waiting state missing:\n%s", waiting)
+	}
+
+	model.btopStreamState = "unavailable"
+	model.btopStreamError = "btop is not installed on this host"
+	unsupported := model.btopPaneView(s, 80, 16)
+	if !strings.Contains(unsupported, "btop is not installed") {
+		t.Fatalf("unsupported state missing:\n%s", unsupported)
+	}
+
+	model.btopStreamState = "error"
+	model.btopStreamError = "SSH authentication required · press enter to connect"
+	auth := model.btopPaneView(s, 80, 16)
+	if !strings.Contains(auth, "DISCONNECTED") || !strings.Contains(auth, "authentication required") {
+		t.Fatalf("authentication recovery state missing:\n%s", auth)
+	}
+}
+
 func TestDashboardHostsTabUsesCompactContextualActions(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.plain = true
@@ -895,6 +1154,39 @@ func TestDashboardSettingsPersistExperimentalTabsInsideTUI(t *testing.T) {
 	}
 	if !cfg.UI.ExperimentalTabs {
 		t.Fatal("experimental tab setting was not persisted")
+	}
+}
+
+func TestDashboardSettingsPersistMonitorBtopInsideTUI(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(defaultConfigYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := newDashboardModel([]string{"alice@one"})
+	model.configPath = configPath
+	model.settingsOpen = true
+	model.settingsCursor = settingsCursorFor(t, settingExperimentalFleetBtop)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(dashboardModel)
+	if cmd == nil || !model.settingsSaving || !model.experimentalFleetBtop {
+		t.Fatalf("Monitor btop save did not start cleanly: cmd=%v model=%#v", cmd, model)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(dashboardModel)
+	if model.settingsSaving || !model.settingsOpen || model.experimentalFleetBtop ||
+		loadedConfig.UI.monitorBtopEnabled() || model.noticeError {
+		t.Fatalf("Monitor btop setting was not saved in context: %#v", model)
+	}
+	cfg, err := loadAppConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UI.monitorBtopEnabled() {
+		t.Fatal("disabled Monitor btop setting was not persisted")
 	}
 }
 
@@ -1657,6 +1949,33 @@ func TestDashboardOpaqueThemesDoNotLeaveRootColorBands(t *testing.T) {
 			if !strings.Contains(line, surfaceParameters) {
 				t.Fatalf("theme=%s left line %d without a painted surface", name, lineIndex)
 			}
+		}
+	}
+}
+
+func TestDashboardOpaqueThemesPaintMonitorAndFleetContinuously(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	for _, theme := range themes {
+		if theme.Surface == "" {
+			continue
+		}
+		for _, workspace := range []string{"console", "fleet"} {
+			model := newDashboardModel([]string{"alice@one", "bob@two"})
+			model.plain = false
+			model.theme = theme
+			model.experimentalTabs = true
+			model.experimentalFleetBtop = true
+			model.workspace = workspace
+			model.width, model.height = 185, 68
+			model.hosts[0].Reachability.Status = reachOnline
+			model.telemetry["alice@one"] = hostTelemetry{Current: telemetrySample{
+				Target: "alice@one", CollectedAt: time.Now(), MemoryUsed: 4, MemoryTotal: 10,
+				BtopInstalled: true, BtopFrame: "┌ cpu ┐\n│ 42% │\n├ proc ┤\n│ worker │",
+			}}
+			assertEveryVisibleCellHasBackground(t, model.View())
 		}
 	}
 }

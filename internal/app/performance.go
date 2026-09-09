@@ -25,7 +25,7 @@ func sshMultiplexArgs() []string {
 	}
 	return []string{
 		"-o", "ControlMaster=auto",
-		"-o", "ControlPersist=120",
+		"-o", "ControlPersist=600",
 		"-o", "ControlPath=" + path,
 	}
 }

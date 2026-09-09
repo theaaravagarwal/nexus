@@ -1601,18 +1601,53 @@ func isFZFCancel(err error) bool {
 	return false
 }
 
+type sshTrafficProfile uint8
+
+const (
+	sshTrafficDefault sshTrafficProfile = iota
+	sshTrafficMonitoring
+)
+
 func buildSSHArgs(host string, interactive bool, remoteCmd string) ([]string, error) {
+	return buildSSHArgsForTraffic(host, interactive, remoteCmd, sshTrafficDefault)
+}
+
+func buildMonitoringSSHArgs(host string, pty bool, remoteCmd string) ([]string, error) {
+	return buildSSHArgsForTraffic(host, pty, remoteCmd, sshTrafficMonitoring)
+}
+
+func buildSSHArgsForTraffic(
+	host string, interactive bool, remoteCmd string, traffic sshTrafficProfile,
+) ([]string, error) {
 	target, err := parseConnectionTarget(host)
 	if err != nil {
 		return nil, err
 	}
+	connectTimeout := connectTimeoutSeconds
+	serverAliveInterval := "20"
+	serverAliveCount := "3"
+	if traffic == sshTrafficMonitoring {
+		connectTimeout = "3"
+		serverAliveInterval = "10"
+		serverAliveCount = "2"
+	}
 	args := []string{
-		"-o", "ConnectTimeout=" + connectTimeoutSeconds,
+		"-o", "ConnectTimeout=" + connectTimeout,
 		"-o", "LogLevel=ERROR",
 		"-o", "VisualHostKey=no",
-		"-o", "ServerAliveInterval=20",
-		"-o", "ServerAliveCountMax=3",
+		"-o", "ServerAliveInterval=" + serverAliveInterval,
+		"-o", "ServerAliveCountMax=" + serverAliveCount,
 		"-q",
+	}
+	if traffic == sshTrafficMonitoring {
+		args = append(args,
+			"-o", "BatchMode=yes",
+			"-o", "ConnectionAttempts=1",
+			"-o", "PreferredAuthentications=publickey",
+			"-o", "GSSAPIAuthentication=no",
+			"-o", "Compression=yes",
+			"-o", "StrictHostKeyChecking=yes",
+		)
 	}
 	args = append(args, sshMultiplexArgs()...)
 	if target.Port != defaultSSHPort {
@@ -1621,7 +1656,10 @@ func buildSSHArgs(host string, interactive bool, remoteCmd string) ([]string, er
 	if interactive {
 		args = append([]string{"-t", "-t"}, args...)
 	} else {
-		args = append(args, "-o", "StrictHostKeyChecking=accept-new", "-T")
+		if traffic != sshTrafficMonitoring {
+			args = append(args, "-o", "StrictHostKeyChecking=accept-new")
+		}
+		args = append(args, "-T")
 	}
 	args = append(args, target.sshDestination())
 	if strings.TrimSpace(remoteCmd) != "" {

@@ -17,6 +17,8 @@ const (
 	telemetryMaxBackoff  = 2 * time.Minute
 	telemetryTimeout     = 4 * time.Second
 	telemetryHistorySize = 30
+	btopMinColumns       = 80
+	btopMinRows          = 24
 )
 
 type gpuTelemetry struct {
@@ -28,18 +30,23 @@ type gpuTelemetry struct {
 }
 
 type telemetrySample struct {
-	Target        string
-	CollectedAt   time.Time
-	Uptime        time.Duration
-	LoadOne       float64
-	CPUCores      int
-	MemoryUsed    uint64
-	MemoryTotal   uint64
-	NetworkRX     uint64
-	NetworkTX     uint64
-	NetworkRXRate float64
-	NetworkTXRate float64
-	GPUs          []gpuTelemetry
+	Target          string
+	CollectedAt     time.Time
+	Uptime          time.Duration
+	LoadOne         float64
+	CPUCores        int
+	CPUUtilization  float64
+	CPUCounterTotal uint64
+	CPUCounterIdle  uint64
+	MemoryUsed      uint64
+	MemoryTotal     uint64
+	NetworkRX       uint64
+	NetworkTX       uint64
+	NetworkRXRate   float64
+	NetworkTXRate   float64
+	GPUs            []gpuTelemetry
+	BtopInstalled   bool
+	BtopFrame       string
 }
 
 type hostTelemetry struct {
@@ -120,6 +127,11 @@ if [ -n "$nvidia_smi" ]; then
 fi
 `
 
+const (
+	btopFrameMarker       = "NEXUS_BTOP_FRAME_BEGIN"
+	btopUnavailableMarker = "NEXUS_BTOP_UNAVAILABLE"
+)
+
 func telemetryTick(delay time.Duration, generation uint64) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		return telemetryTickMsg{Generation: generation}
@@ -138,37 +150,39 @@ func telemetryCommand(target string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), telemetryTimeout)
 		defer cancel()
-		args, err := buildSSHArgs(target, false, remoteShellCommand("sh", telemetryScript))
+		args, err := buildMonitoringSSHArgs(target, false, remoteShellCommand("sh", telemetryScript))
 		if err != nil {
 			return telemetryResultMsg{Generation: generation, Target: target, Err: err}
 		}
-		insertAt := len(args) - 2
-		if insertAt < 0 {
-			return telemetryResultMsg{
-				Generation: generation, Target: target,
-				Err: errors.New("invalid SSH telemetry arguments"),
-			}
-		}
-		withBatch := make([]string, 0, len(args)+2)
-		withBatch = append(withBatch, args[:insertAt]...)
-		withBatch = append(withBatch, "-o", "BatchMode=yes")
-		withBatch = append(withBatch, args[insertAt:]...)
-		command := exec.CommandContext(ctx, "ssh", withBatch...)
+		command := exec.CommandContext(ctx, "ssh", args...)
 		var output boundedMetadataOutput
 		command.Stdout = &output
-		if err := command.Run(); err != nil {
-			if ctx.Err() != nil {
-				err = fmt.Errorf("telemetry timed out: %w", ctx.Err())
-			}
-			return telemetryResultMsg{Generation: generation, Target: target, Err: err}
-		}
+		runErr := command.Run()
 		sample, err := parseTelemetry(output.String())
+		if err == nil && runErr != nil {
+			if ctx.Err() != nil {
+				runErr = fmt.Errorf("telemetry timed out: %w", ctx.Err())
+			}
+			err = runErr
+		}
 		sample.Target = target
 		sample.CollectedAt = time.Now()
 		return telemetryResultMsg{
 			Generation: generation, Target: target, Sample: sample, Err: err,
 		}
 	}
+}
+
+func splitBtopOutput(output string) (metadata, frame string, ok bool) {
+	index := strings.Index(output, btopFrameMarker)
+	if index < 0 {
+		return output, "", false
+	}
+	start := index + len(btopFrameMarker)
+	for start < len(output) && (output[start] == '\r' || output[start] == '\n') {
+		start++
+	}
+	return output[:index], output[start:], true
 }
 
 func parseTelemetry(output string) (telemetrySample, error) {
@@ -228,6 +242,14 @@ func parseTelemetry(output string) (telemetrySample, error) {
 func appendTelemetry(history []telemetrySample, sample telemetrySample) []telemetrySample {
 	if len(history) > 0 {
 		previous := history[len(history)-1]
+		if sample.CPUCounterTotal > previous.CPUCounterTotal {
+			total := sample.CPUCounterTotal - previous.CPUCounterTotal
+			idle := uint64(0)
+			if sample.CPUCounterIdle >= previous.CPUCounterIdle {
+				idle = sample.CPUCounterIdle - previous.CPUCounterIdle
+			}
+			sample.CPUUtilization = 100 * float64(total-min(total, idle)) / float64(total)
+		}
 		elapsed := sample.CollectedAt.Sub(previous.CollectedAt).Seconds()
 		if elapsed > 0 {
 			if sample.NetworkRX >= previous.NetworkRX {
@@ -238,9 +260,25 @@ func appendTelemetry(history []telemetrySample, sample telemetrySample) []teleme
 			}
 		}
 	}
+	// The remote terminal frame is useful only for the current Monitor view.
+	// Numeric history stays small as users move between hosts.
+	sample.BtopInstalled = false
+	sample.BtopFrame = ""
 	history = append(history, sample)
 	if len(history) > telemetryHistorySize {
 		history = append([]telemetrySample(nil), history[len(history)-telemetryHistorySize:]...)
 	}
 	return history
+}
+
+func mergeTelemetrySample(entry hostTelemetry, sample telemetrySample) hostTelemetry {
+	previousBtop := entry.Current
+	entry.History = appendTelemetry(entry.History, sample)
+	entry.Current = entry.History[len(entry.History)-1]
+	entry.Current.BtopInstalled = previousBtop.BtopInstalled
+	entry.Current.BtopFrame = previousBtop.BtopFrame
+	entry.Failures = 0
+	entry.LastErr = ""
+	entry.NextAttempt = time.Time{}
+	return entry
 }

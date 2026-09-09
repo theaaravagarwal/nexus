@@ -81,10 +81,10 @@ func (a *app) newDoctorCmd() *cobra.Command {
 				stateStatus = "invalid: " + sanitizeTerminalText(err.Error())
 			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-				"config   %s (%s)\nhistory  %s\nstate    %s (%s)\nprofile  %s\ntheme    %s\ndensity  %s\nworkspace %s\ntabs     %t\npins     %d configured, %d unresolved\n",
+				"config   %s (%s)\nhistory  %s\nstate    %s (%s)\nprofile  %s\ntheme    %s\ndensity  %s\nworkspace %s\ntabs     %t\nmonitor btop %t\npins     %d configured, %d unresolved\n",
 				a.configFile, configMode, a.hostsFile, a.stateFile, stateStatus,
 				loadedConfig.UI.Profile, activeTheme().Name, loadedConfig.UI.Density,
-				loadedConfig.UI.Workspace, loadedConfig.UI.ExperimentalTabs,
+				loadedConfig.UI.Workspace, loadedConfig.UI.ExperimentalTabs, loadedConfig.UI.monitorBtopEnabled(),
 				len(loadedConfig.UI.PinnedActions), len(unresolvedPinnedActions(loadedConfig)))
 			if requiredMissing {
 				return fmt.Errorf("required dependency missing: ssh")

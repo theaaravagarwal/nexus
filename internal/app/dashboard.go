@@ -180,75 +180,107 @@ type transferFlow struct {
 }
 
 type dashboardModel struct {
-	hosts               []dashboardHost
-	filtered            []int
-	cursor              int
-	query               string
-	filtering           bool
-	width               int
-	height              int
-	choice              dashboardSelection
-	done                bool
-	commandOpen         bool
-	commandFiltering    bool
-	commandCursor       int
-	commandQuery        string
-	confirmOpen         bool
-	confirmAction       dashboardSelection
-	confirmOffset       int
-	commandResult       *configuredCommandResult
-	commandRunning      bool
-	commandOffset       int
-	actionUses          map[string]int
-	transfer            *transferFlow
-	helpOpen            bool
-	themeOpen           bool
-	themeCursor         int
-	themeOriginal       theme
-	themePreview        bool
-	themeSaving         bool
-	workspaceOpen       bool
-	workspaceCursor     int
-	workspaceOriginal   string
-	workspaceSaving     bool
-	workspace           string
-	settingsOpen        bool
-	settingsCursor      int
-	settingsSaving      bool
-	profile             string
-	density             string
-	experimentalTabs    bool
-	monitorActionFocus  bool
-	monitorActionCursor int
-	activityOpen        bool
-	activityCursor      int
-	showTopology        bool
-	probing             bool
-	probeQueue          []string
-	probeInitial        []string
-	probeTargets        map[string]bool
-	probeTotal          int
-	probeComplete       int
-	metadataBusy        map[string]bool
-	statePath           string
-	configPath          string
-	indexMode           string
-	notice              string
-	noticeError         bool
-	plain               bool
-	theme               theme
-	now                 time.Time
-	operation           *dashboardOperation
-	operationPersisted  bool
-	operationID         uint64
-	operationProbeID    uint64
-	terminalRunning     bool
-	telemetry           map[string]hostTelemetry
-	telemetryTarget     string
-	telemetryGen        uint64
-	telemetryFlight     uint64
-	telemetryFocused    bool
-	activities          []activityEvent
+	hosts                  []dashboardHost
+	filtered               []int
+	cursor                 int
+	query                  string
+	filtering              bool
+	width                  int
+	height                 int
+	choice                 dashboardSelection
+	done                   bool
+	commandOpen            bool
+	commandFiltering       bool
+	commandCursor          int
+	commandQuery           string
+	confirmOpen            bool
+	confirmAction          dashboardSelection
+	confirmOffset          int
+	commandResult          *configuredCommandResult
+	commandRunning         bool
+	commandOffset          int
+	actionUses             map[string]int
+	transfer               *transferFlow
+	helpOpen               bool
+	themeOpen              bool
+	themeCursor            int
+	themeOriginal          theme
+	themePreview           bool
+	themeSaving            bool
+	workspaceOpen          bool
+	workspaceCursor        int
+	workspaceOriginal      string
+	workspaceSaving        bool
+	workspace              string
+	settingsOpen           bool
+	settingsCursor         int
+	settingsSaving         bool
+	profile                string
+	density                string
+	experimentalTabs       bool
+	experimentalFleetBtop  bool
+	monitorActionFocus     bool
+	monitorActionCursor    int
+	activityOpen           bool
+	activityCursor         int
+	showTopology           bool
+	probing                bool
+	probeQueue             []string
+	probeInitial           []string
+	probeTargets           map[string]bool
+	probeTotal             int
+	probeComplete          int
+	metadataBusy           map[string]bool
+	statePath              string
+	configPath             string
+	indexMode              string
+	notice                 string
+	noticeError            bool
+	plain                  bool
+	theme                  theme
+	now                    time.Time
+	operation              *dashboardOperation
+	operationPersisted     bool
+	operationID            uint64
+	operationProbeID       uint64
+	terminalRunning        bool
+	telemetry              map[string]hostTelemetry
+	telemetryTarget        string
+	telemetryGen           uint64
+	telemetryFlight        uint64
+	telemetryFocused       bool
+	fleetTelemetryPool     *fleetTelemetryPool
+	fleetTelemetryWaiting  bool
+	fleetTelemetryRotation int
+	btopStreamPool         *btopStreamPool
+	btopStreamWaiting      bool
+	btopStreamTarget       string
+	btopStreamGeneration   uint64
+	btopStreamColumns      int
+	btopStreamRows         int
+	btopStreamState        string
+	btopStreamError        string
+	btopStreamFrames       uint64
+	btopStreamUpdatedAt    time.Time
+	btopStreamRetryAt      time.Time
+	btopResizeGeneration   uint64
+	btopResizePending      bool
+	activities             []activityEvent
+}
+
+const (
+	dashboardChromeRows  = 4
+	btopResizeSettleTime = 120 * time.Millisecond
+)
+
+type btopViewportSettledMsg struct {
+	Generation uint64
+}
+
+func settleBtopViewport(generation uint64) tea.Cmd {
+	return tea.Tick(btopResizeSettleTime, func(time.Time) tea.Msg {
+		return btopViewportSettledMsg{Generation: generation}
+	})
 }
 
 func newDashboardModel(hosts []string) dashboardModel {
@@ -258,23 +290,24 @@ func newDashboardModel(hosts []string) dashboardModel {
 func newDashboardModelWithState(hosts []string, state nexusState, now time.Time) dashboardModel {
 	safe := dedupeKeepOrder(hosts)
 	model := dashboardModel{
-		width:            100,
-		height:           30,
-		showTopology:     false,
-		probeTargets:     make(map[string]bool),
-		metadataBusy:     make(map[string]bool),
-		actionUses:       make(map[string]int, len(state.Actions)),
-		indexMode:        "lazy",
-		plain:            noColorRequested(),
-		theme:            activeTheme(),
-		workspace:        normalizeWorkspaceMode(loadedConfig.UI.Workspace),
-		profile:          normalizeVisualProfile(loadedConfig.UI.Profile),
-		density:          normalizeUIDensity(loadedConfig.UI.Density),
-		experimentalTabs: loadedConfig.UI.ExperimentalTabs,
-		now:              now,
-		telemetry:        make(map[string]hostTelemetry),
-		telemetryGen:     1,
-		telemetryFocused: true,
+		width:                 100,
+		height:                30,
+		showTopology:          false,
+		probeTargets:          make(map[string]bool),
+		metadataBusy:          make(map[string]bool),
+		actionUses:            make(map[string]int, len(state.Actions)),
+		indexMode:             "lazy",
+		plain:                 noColorRequested(),
+		theme:                 activeTheme(),
+		workspace:             normalizeWorkspaceMode(loadedConfig.UI.Workspace),
+		profile:               normalizeVisualProfile(loadedConfig.UI.Profile),
+		density:               normalizeUIDensity(loadedConfig.UI.Density),
+		experimentalTabs:      loadedConfig.UI.ExperimentalTabs,
+		experimentalFleetBtop: loadedConfig.UI.monitorBtopEnabled(),
+		now:                   now,
+		telemetry:             make(map[string]hostTelemetry),
+		telemetryGen:          1,
+		telemetryFocused:      true,
 	}
 	if model.experimentalTabs {
 		model.workspace = "workbench"
@@ -332,7 +365,7 @@ func noColorRequested() bool {
 }
 
 func (m dashboardModel) Init() tea.Cmd {
-	commands := []tea.Cmd{telemetryTick(time.Second, m.telemetryGen)}
+	commands := []tea.Cmd{telemetryTick(time.Second, m.telemetryGen), fleetTelemetryRotateTick()}
 	if len(m.probeInitial) > 0 {
 		commands = append(commands, m.probeCommands(m.probeInitial))
 	}
@@ -558,17 +591,33 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.FocusMsg:
 		m.telemetryFocused = true
-		return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+		return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
 	case tea.BlurMsg:
 		m.telemetryFocused = false
+		m.deactivateBtopStream()
+		m.closeFleetTelemetry()
 		return m, nil
 	case tea.WindowSizeMsg:
+		sizeChanged := m.width != max(1, msg.Width) || m.height != max(1, msg.Height)
 		m.width = max(1, msg.Width)
 		m.height = max(1, msg.Height)
 		if m.height < 16 {
 			m.activityOpen = false
 		}
-		return m, nil
+		if sizeChanged {
+			settled := m.deferBtopViewportResize()
+			return m, tea.Batch(
+				m.ensureBtopStream(),
+				settled,
+			)
+		}
+		return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry())
+	case btopViewportSettledMsg:
+		if msg.Generation != m.btopResizeGeneration {
+			return m, nil
+		}
+		m.btopResizePending = false
+		return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry())
 	case probeTargetMsg:
 		result := reachabilityResult(msg)
 		for i := range m.hosts {
@@ -736,6 +785,18 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				state = "on"
 			}
 			m.notice = "Experimental workspace tabs: " + state
+		case "monitor_btop":
+			loadedConfig.UI.MonitorBtop = &msg.Enabled
+			loadedConfig.UI.ExperimentalFleetBtop = false
+			m.experimentalFleetBtop = msg.Enabled
+			if !msg.Enabled {
+				m.closeBtopStreams()
+			}
+			state := "off"
+			if msg.Enabled {
+				state = "on"
+			}
+			m.notice = "Monitor btop: " + state
 		}
 		m.noticeError = false
 		return m, nil
@@ -755,7 +816,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.notice = "SSH connection failed · check the host, credentials, or network"
 			}
 			m.noticeError = true
-			return m, m.finishOperation("error", label+" failed", "")
+			return m, tea.Batch(m.finishOperation("error", label+" failed", ""), m.ensureBtopStream())
 		}
 		usedAt := time.Now()
 		if m.statePath != "" {
@@ -773,7 +834,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.notice = summary
 		m.noticeError = false
-		return m, m.finishOperation("success", summary, "")
+		return m, tea.Batch(m.finishOperation("success", summary, ""), m.ensureBtopStream())
 	case configuredCommandMsg:
 		m.commandRunning = false
 		if m.commandResult == nil {
@@ -812,24 +873,31 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if target != m.telemetryTarget {
 			m.telemetryTarget = target
 			m.telemetryGen++
-			return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+			m.deactivateBtopStream()
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
 		}
+		btopCommand := m.ensureBtopStream()
+		fleetCommand := m.ensureFleetTelemetry()
 		if target == "" || !m.telemetryFocused || m.telemetryPaused() {
-			return m, telemetryTick(telemetryInterval, m.telemetryGen)
+			return m, tea.Batch(btopCommand, fleetCommand, telemetryTick(telemetryInterval, m.telemetryGen))
+		}
+		workspace := normalizeWorkspaceMode(m.workspace)
+		if workspace == "console" || workspace == "fleet" {
+			return m, tea.Batch(btopCommand, fleetCommand, telemetryTick(time.Second, m.telemetryGen))
 		}
 		if m.telemetryFlight != 0 {
-			return m, telemetryTick(time.Second, m.telemetryGen)
+			return m, tea.Batch(btopCommand, fleetCommand, telemetryTick(time.Second, m.telemetryGen))
 		}
 		host := m.selectedHost()
 		if host.Reachability.Status != reachOnline {
-			return m, telemetryTick(telemetryInterval, m.telemetryGen)
+			return m, tea.Batch(btopCommand, fleetCommand, telemetryTick(telemetryInterval, m.telemetryGen))
 		}
 		entry := m.telemetry[target]
 		if wait := time.Until(entry.NextAttempt); wait > 0 {
-			return m, telemetryTick(min(wait, telemetryMaxBackoff), m.telemetryGen)
+			return m, tea.Batch(btopCommand, fleetCommand, telemetryTick(min(wait, telemetryMaxBackoff), m.telemetryGen))
 		}
 		m.telemetryFlight = m.telemetryGen
-		return m, telemetryCommand(target, m.telemetryGen)
+		return m, tea.Batch(btopCommand, fleetCommand, telemetryCommand(target, m.telemetryGen))
 	case telemetryResultMsg:
 		if msg.Generation == m.telemetryFlight {
 			m.telemetryFlight = 0
@@ -846,13 +914,69 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.telemetry[msg.Target] = entry
 			return m, telemetryTick(delay, m.telemetryGen)
 		}
-		entry.Failures = 0
-		entry.LastErr = ""
-		entry.NextAttempt = time.Time{}
-		entry.History = appendTelemetry(entry.History, msg.Sample)
-		entry.Current = entry.History[len(entry.History)-1]
-		m.telemetry[msg.Target] = entry
+		m.telemetry[msg.Target] = mergeTelemetrySample(entry, msg.Sample)
 		return m, telemetryTick(telemetryInterval, m.telemetryGen)
+	case fleetTelemetryBatchMsg:
+		m.fleetTelemetryWaiting = false
+		for _, event := range msg.Events {
+			if m.fleetTelemetryPool == nil || !m.fleetTelemetryPool.current(event.Target, event.Generation) {
+				continue
+			}
+			entry := m.telemetry[event.Target]
+			if event.Err != nil {
+				entry.Failures++
+				entry.LastErr = sanitizeTerminalText(event.Err.Error())
+				m.telemetry[event.Target] = entry
+				continue
+			}
+			m.telemetry[event.Target] = mergeTelemetrySample(entry, event.Sample)
+		}
+		return m, m.waitForFleetTelemetry()
+	case fleetTelemetryPoolClosedMsg:
+		m.fleetTelemetryWaiting = false
+		return m, nil
+	case fleetTelemetryRotateMsg:
+		m.fleetTelemetryRotation++
+		return m, tea.Batch(m.ensureFleetTelemetry(), fleetTelemetryRotateTick())
+	case btopStreamEventMsg:
+		m.btopStreamWaiting = false
+		if msg.Generation == 0 || msg.Generation != m.btopStreamGeneration ||
+			msg.Target != m.btopStreamTarget || msg.Target != m.selectedTarget() {
+			return m, m.waitForBtopStream()
+		}
+		if msg.Frame != "" {
+			entry := m.telemetry[msg.Target]
+			entry.Current.Target = msg.Target
+			if entry.Current.CollectedAt.IsZero() {
+				entry.Current.CollectedAt = msg.UpdatedAt
+			}
+			entry.Current.BtopInstalled = true
+			entry.Current.BtopFrame = msg.Frame
+			m.telemetry[msg.Target] = entry
+			m.btopStreamState = "live"
+			m.btopStreamError = ""
+			m.btopStreamFrames = msg.FrameCount
+			m.btopStreamUpdatedAt = msg.UpdatedAt
+		}
+		if msg.Done {
+			if !msg.Installed && msg.Error == "" {
+				m.btopStreamState = "unavailable"
+				m.btopStreamError = "btop is not installed on this host"
+				m.btopStreamRetryAt = time.Now().Add(time.Minute)
+			} else if msg.Error != "" {
+				m.btopStreamState = "error"
+				m.btopStreamError = msg.Error
+				m.btopStreamRetryAt = time.Now().Add(15 * time.Second)
+			} else {
+				m.btopStreamState = "idle"
+				m.btopStreamRetryAt = time.Now().Add(3 * time.Second)
+			}
+			return m, nil
+		}
+		return m, m.waitForBtopStream()
+	case btopStreamPoolClosedMsg:
+		m.btopStreamWaiting = false
+		return m, nil
 	case actionUsageMsg:
 		if msg.Err != nil {
 			logVerbose("failed to record action usage: %v", msg.Err)
@@ -890,6 +1014,8 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := dashboardNavigationKey(msg.String())
 	if key == "ctrl+c" {
+		m.closeBtopStreams()
+		m.closeFleetTelemetry()
 		m.done = true
 		return m, tea.Quit
 	}
@@ -937,6 +1063,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc":
 			m.helpOpen = false
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry())
 		}
 		return m, nil
 	}
@@ -945,6 +1072,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc", "o":
 			m.activityOpen = false
+			return m, m.deferBtopViewportResize()
 		case "k":
 			m.activityCursor = max(0, m.activityCursor-1)
 		case "j":
@@ -1041,6 +1169,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "esc":
 			m.settingsOpen = false
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry())
 		case "k":
 			m.settingsCursor = (m.settingsCursor + len(items) - 1) % len(items)
 		case "j":
@@ -1275,35 +1404,47 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch key {
 	case "q":
+		m.closeBtopStreams()
+		m.closeFleetTelemetry()
 		m.done = true
 		return m, tea.Quit
 	case "tab":
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(1)
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
 		}
 	case "shift+tab":
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(-1)
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
 		}
 	case "left":
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(-1)
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
 		}
 	case "right":
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(1)
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
 		}
 	case "h":
 		m.helpOpen = true
+		m.deactivateBtopStream()
 	case ",":
 		m.settingsOpen = true
+		m.deactivateBtopStream()
 	case "o":
 		if m.height >= 16 {
 			m.activityOpen = true
 			m.activityCursor = 0
+			return m, m.deferBtopViewportResize()
 		}
 	case "r":
-		return m.startMetadataRefresh()
+		refreshed, metadataCommand := m.startMetadataRefresh()
+		m = refreshed.(dashboardModel)
+		m.restartBtopStream()
+		return m, tea.Batch(metadataCommand, m.ensureBtopStream())
 	case "/":
 		m.filtering = true
 	case "a":
@@ -1311,6 +1452,7 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.commandFiltering = false
 		m.commandCursor = 0
 		m.commandQuery = ""
+		m.deactivateBtopStream()
 	case "k":
 		before := m.selectedTarget()
 		m.moveCursor(-1)
@@ -1347,9 +1489,206 @@ func (m dashboardModel) telemetryPaused() bool {
 		m.transfer != nil || m.commandResult != nil || m.showTopology || m.terminalRunning
 }
 
+func (m *dashboardModel) ensureFleetTelemetry() tea.Cmd {
+	workspace := normalizeWorkspaceMode(m.workspace)
+	if !m.telemetryFocused || m.telemetryPaused() || (workspace != "console" && workspace != "fleet") {
+		m.closeFleetTelemetry()
+		return nil
+	}
+	specs := m.fleetTelemetrySpecs(workspace)
+	if len(specs) == 0 {
+		m.closeFleetTelemetry()
+		return nil
+	}
+	if m.fleetTelemetryPool == nil {
+		m.fleetTelemetryPool = newFleetTelemetryPool()
+	}
+	m.fleetTelemetryPool.sync(specs)
+	return m.waitForFleetTelemetry()
+}
+
+func (m dashboardModel) fleetTelemetrySpecs(workspace string) []fleetTelemetrySpec {
+	eligible := func(host dashboardHost) bool {
+		return host.Reachability.Status == reachOnline || host.Reachability.Status == reachUnknown
+	}
+	selected := m.selectedTarget()
+	if workspace == "console" {
+		if selected == "" || !eligible(m.selectedHost()) {
+			return nil
+		}
+		return []fleetTelemetrySpec{{Target: selected, Interval: 3 * time.Second}}
+	}
+	seen := make(map[string]bool, fleetTelemetryMaxStreams)
+	specs := make([]fleetTelemetrySpec, 0, fleetTelemetryMaxStreams)
+	appendSpec := func(target string, interval time.Duration) {
+		if target == "" || seen[target] || len(specs) >= fleetTelemetryMaxStreams {
+			return
+		}
+		for _, host := range m.hosts {
+			if host.Target == target && eligible(host) {
+				seen[target] = true
+				specs = append(specs, fleetTelemetrySpec{Target: target, Interval: interval})
+				return
+			}
+		}
+	}
+	appendSpec(selected, 3*time.Second)
+	rowBudget := max(1, m.height-7)
+	start, end := selectionWindow(len(m.filtered), m.cursor, rowBudget)
+	for position := start; position < end; position++ {
+		appendSpec(m.hosts[m.filtered[position]].Target, 5*time.Second)
+	}
+	if len(specs) >= fleetTelemetryMaxStreams || len(m.filtered) == 0 {
+		return specs
+	}
+	offscreen := make([]string, 0, len(m.filtered))
+	for position, index := range m.filtered {
+		if position >= start && position < end {
+			continue
+		}
+		target := m.hosts[index].Target
+		if !seen[target] && eligible(m.hosts[index]) {
+			offscreen = append(offscreen, target)
+		}
+	}
+	if len(offscreen) > 0 {
+		startAt := (m.fleetTelemetryRotation * max(1, fleetTelemetryMaxStreams-len(specs))) % len(offscreen)
+		for offset := 0; offset < len(offscreen) && len(specs) < fleetTelemetryMaxStreams; offset++ {
+			appendSpec(offscreen[(startAt+offset)%len(offscreen)], 15*time.Second)
+		}
+	}
+	return specs
+}
+
+func (m *dashboardModel) waitForFleetTelemetry() tea.Cmd {
+	if m.fleetTelemetryPool == nil || m.fleetTelemetryWaiting {
+		return nil
+	}
+	m.fleetTelemetryWaiting = true
+	return waitForFleetTelemetry(m.fleetTelemetryPool)
+}
+
+func (m *dashboardModel) closeFleetTelemetry() {
+	pool := m.fleetTelemetryPool
+	m.fleetTelemetryPool = nil
+	m.fleetTelemetryWaiting = false
+	if pool != nil {
+		pool.close()
+	}
+}
+
+func (m dashboardModel) monitorBtopViewport() (columns, rows int, ok bool) {
+	if !m.experimentalFleetBtop || normalizeWorkspaceMode(m.workspace) != "console" ||
+		m.width < 120 || m.height < 20 {
+		return 0, 0, false
+	}
+	_, workspaceHeight, _ := m.dashboardHeights()
+	actionWidth := m.monitorActionWidth(m.width)
+	monitorWidth := m.width - actionWidth
+	_, btopHeight := monitorPaneHeights(workspaceHeight)
+	columns, rows = btopFrameViewport(monitorWidth, btopHeight, false, true)
+	if columns < btopMinColumns || rows < btopMinRows {
+		return 0, 0, false
+	}
+	return columns, rows, true
+}
+
+func (m *dashboardModel) ensureBtopStream() tea.Cmd {
+	columns, rows, visible := m.monitorBtopViewport()
+	target := m.selectedTarget()
+	if !visible || target == "" || !m.telemetryFocused || m.telemetryPaused() {
+		m.deactivateBtopStream()
+		return nil
+	}
+	if m.btopResizePending {
+		return m.waitForBtopStream()
+	}
+	if m.btopStreamTarget == target &&
+		m.btopStreamColumns == columns && m.btopStreamRows == rows &&
+		time.Now().Before(m.btopStreamRetryAt) {
+		return m.waitForBtopStream()
+	}
+	if m.btopStreamPool == nil {
+		m.btopStreamPool = newBtopStreamPool()
+	}
+	latest, started := m.btopStreamPool.activate(target, columns, rows)
+	m.btopStreamTarget = target
+	m.btopStreamGeneration = latest.Generation
+	m.btopStreamColumns = columns
+	m.btopStreamRows = rows
+	m.btopStreamRetryAt = time.Time{}
+	if started || latest.Frame == "" {
+		m.btopStreamState = "connecting"
+		m.btopStreamError = ""
+		m.btopStreamFrames = 0
+		m.btopStreamUpdatedAt = time.Time{}
+	} else {
+		entry := m.telemetry[target]
+		entry.Current.Target = target
+		entry.Current.BtopInstalled = true
+		entry.Current.BtopFrame = latest.Frame
+		m.telemetry[target] = entry
+		m.btopStreamState = "live"
+		m.btopStreamError = ""
+		m.btopStreamFrames = latest.FrameCount
+		m.btopStreamUpdatedAt = latest.UpdatedAt
+	}
+	return m.waitForBtopStream()
+}
+
+func (m *dashboardModel) deferBtopViewportResize() tea.Cmd {
+	m.btopResizeGeneration++
+	m.btopResizePending = true
+	return settleBtopViewport(m.btopResizeGeneration)
+}
+
+func (m *dashboardModel) waitForBtopStream() tea.Cmd {
+	if m.btopStreamPool == nil || m.btopStreamWaiting {
+		return nil
+	}
+	m.btopStreamWaiting = true
+	return waitForBtopStreamPool(m.btopStreamPool)
+}
+
+func (m *dashboardModel) deactivateBtopStream() {
+	if m.btopStreamPool != nil {
+		m.btopStreamPool.deactivate()
+	}
+	m.btopStreamTarget = ""
+	m.btopStreamColumns = 0
+	m.btopStreamRows = 0
+	m.btopStreamState = ""
+	m.btopStreamError = ""
+	m.btopStreamFrames = 0
+	m.btopStreamUpdatedAt = time.Time{}
+	m.btopStreamRetryAt = time.Time{}
+}
+
+func (m *dashboardModel) restartBtopStream() {
+	target := m.btopStreamTarget
+	if target == "" {
+		target = m.selectedTarget()
+	}
+	if m.btopStreamPool != nil {
+		m.btopStreamPool.cancelTarget(target)
+	}
+	m.deactivateBtopStream()
+}
+
+func (m *dashboardModel) closeBtopStreams() {
+	pool := m.btopStreamPool
+	m.btopStreamPool = nil
+	m.btopStreamWaiting = false
+	if pool != nil {
+		pool.close()
+	}
+	m.deactivateBtopStream()
+}
+
 func (m *dashboardModel) resetTelemetryTarget() {
 	m.telemetryTarget = m.selectedTarget()
 	m.telemetryGen++
+	m.deactivateBtopStream()
 }
 
 func (m *dashboardModel) openThemePreview() {
@@ -1385,13 +1724,14 @@ func workspaceLabel(name string) string {
 type settingsItem string
 
 const (
-	settingProfile          settingsItem = "profile"
-	settingTheme            settingsItem = "theme"
-	settingBackground       settingsItem = "background"
-	settingDensity          settingsItem = "density"
-	settingExperimentalTabs settingsItem = "experimental-tabs"
-	settingWorkspace        settingsItem = "workspace"
-	settingConfig           settingsItem = "config"
+	settingProfile               settingsItem = "profile"
+	settingTheme                 settingsItem = "theme"
+	settingBackground            settingsItem = "background"
+	settingDensity               settingsItem = "density"
+	settingExperimentalTabs      settingsItem = "experimental-tabs"
+	settingExperimentalFleetBtop settingsItem = "experimental-fleet-btop"
+	settingWorkspace             settingsItem = "workspace"
+	settingConfig                settingsItem = "config"
 )
 
 func settingsItems() []settingsItem {
@@ -1401,6 +1741,7 @@ func settingsItems() []settingsItem {
 		settingBackground,
 		settingDensity,
 		settingExperimentalTabs,
+		settingExperimentalFleetBtop,
 		settingWorkspace,
 		settingConfig,
 	}
@@ -1435,6 +1776,9 @@ func (m dashboardModel) updateSetting(item settingsItem, direction int) (tea.Mod
 	case settingExperimentalTabs:
 		m.settingsSaving = true
 		return m, m.saveSettingsCommand("experimental_tabs", "", !m.experimentalTabs)
+	case settingExperimentalFleetBtop:
+		m.settingsSaving = true
+		return m, m.saveSettingsCommand("monitor_btop", "", !m.experimentalFleetBtop)
 	case settingWorkspace:
 		if direction < 0 {
 			return m, nil
@@ -1521,6 +1865,8 @@ func (m dashboardModel) saveSettingsCommand(key, value string, enabled bool) tea
 			err = saveDensityToConfig(configPath, value)
 		case "experimental_tabs":
 			err = saveExperimentalTabsToConfig(configPath, enabled)
+		case "monitor_btop":
+			err = saveMonitorBtopToConfig(configPath, enabled)
 		default:
 			err = fmt.Errorf("unknown UI setting %q", key)
 		}
@@ -1578,6 +1924,7 @@ func (m dashboardModel) startTerminalAction(selection dashboardSelection, usageC
 	m.confirmOpen = false
 	m.confirmAction = dashboardSelection{}
 	m.confirmOffset = 0
+	m.deactivateBtopStream()
 	m.terminalRunning = true
 	m.notice = "OpenSSH session active"
 	m.noticeError = false
@@ -1977,13 +2324,7 @@ func (m dashboardModel) View() string {
 	s := m.styles()
 	header := m.headerView(s)
 	footer := m.footerView(s)
-	bodyHeight := max(3, m.height-lipgloss.Height(header)-lipgloss.Height(footer))
-	workspaceHeight := bodyHeight
-	drawerHeight := 0
-	if m.activityOpen && bodyHeight >= 12 {
-		drawerHeight = min(12, max(7, bodyHeight/3))
-		workspaceHeight = max(3, bodyHeight-drawerHeight)
-	}
+	bodyHeight, workspaceHeight, drawerHeight := m.dashboardHeights()
 	body := m.dashboardBodyView(s, m.width, workspaceHeight)
 	if drawerHeight > 0 {
 		body = lipgloss.JoinVertical(lipgloss.Left,
@@ -1995,6 +2336,16 @@ func (m dashboardModel) View() string {
 	return m.finishView(
 		lipgloss.JoinVertical(lipgloss.Left, header, body, footer),
 	)
+}
+
+func (m dashboardModel) dashboardHeights() (body, workspace, drawer int) {
+	body = max(3, m.height-dashboardChromeRows)
+	workspace = body
+	if m.activityOpen && body >= 12 {
+		drawer = min(12, max(7, body/3))
+		workspace = max(3, body-drawer)
+	}
+	return body, workspace, drawer
 }
 
 func (m dashboardModel) dashboardBodyView(s dashboardStyles, width, bodyHeight int) string {
@@ -2258,11 +2609,63 @@ func (m dashboardModel) workbenchWorkspaceView(s dashboardStyles, width, height 
 func (m dashboardModel) consoleWorkspaceView(s dashboardStyles, width, height int) string {
 	actionWidth := m.monitorActionWidth(width)
 	monitorWidth := width - actionWidth
+	summaryHeight, btopHeight := monitorPaneHeights(height)
+	monitor := lipgloss.JoinVertical(lipgloss.Left,
+		fitTerminalView(m.monitorSummaryView(s, monitorWidth, summaryHeight), monitorWidth, summaryHeight),
+		fitTerminalView(m.btopPanelView(s, monitorWidth, btopHeight, false, true), monitorWidth, btopHeight),
+	)
 	return lipgloss.NewStyle().Width(width).Height(height).Render(
 		lipgloss.JoinHorizontal(lipgloss.Top,
-			fitTerminalView(m.telemetryView(s, monitorWidth, height), monitorWidth, height),
+			fitTerminalView(monitor, monitorWidth, height),
 			fitTerminalView(m.monitorActionRailView(s, actionWidth, height), actionWidth, height),
 		),
+	)
+}
+
+func monitorPaneHeights(height int) (summary, btop int) {
+	switch {
+	case height >= 38:
+		summary = max(10, height/3)
+	case height >= 30:
+		summary = 6
+	default:
+		summary = 4
+	}
+	// Keep the complete minimum btop terminal visible: 24 terminal rows plus
+	// the pane's top border, title, and divider.
+	if height >= btopMinRows+3 {
+		summary = min(summary, max(1, height-(btopMinRows+3)))
+	}
+	return summary, max(1, height-summary)
+}
+
+func (m dashboardModel) monitorSummaryView(s dashboardStyles, width, height int) string {
+	if height >= 9 {
+		return m.telemetryView(s, width, height)
+	}
+	host := m.selectedHost()
+	entry := m.telemetry[host.Target]
+	lines := []string{s.focus.Render("LIVE MONITOR")}
+	if host.Target == "" {
+		lines = append(lines, s.muted.Render("Select a host to begin sampling."))
+	} else if entry.Current.CollectedAt.IsZero() {
+		lines = append(lines, s.text.Render(displayName(host))+"  "+m.statusText(s, host.Reachability),
+			s.muted.Render("Waiting for a compact sample"))
+	} else {
+		sample := entry.Current
+		stats := fmt.Sprintf("CPU %.0f%% · MEM %s · LOAD %.2f · ↓ %s ↑ %s",
+			sample.CPUUtilization, capacityUsage(sample.MemoryUsed, sample.MemoryTotal), sample.LoadOne,
+			formatByteRate(sample.NetworkRXRate), formatByteRate(sample.NetworkTXRate))
+		lines = append(lines,
+			s.text.Render(displayName(host))+"  "+m.statusText(s, host.Reachability)+
+				s.muted.Render(" · "+relativeTime(sample.CollectedAt, time.Now())),
+			s.muted.Render(truncateText(stats, max(1, width-4))),
+		)
+	}
+	return m.renderPanel(
+		s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
+			Width(max(1, width)).Height(max(1, height)).Padding(0, 1),
+		strings.Join(lines, "\n"),
 	)
 }
 
@@ -2693,39 +3096,174 @@ func (m dashboardModel) consoleOutputView(s dashboardStyles, width, height int) 
 }
 
 func (m dashboardModel) fleetDeckView(s dashboardStyles, width, height int) string {
+	return m.fleetInventoryView(s, width, height)
+}
+
+func (m dashboardModel) fleetInventoryView(s dashboardStyles, width, height int) string {
 	lines := []string{
 		s.focus.Render("FLEET WORKSPACE"),
-		s.muted.Render("Cached inventory with explicit freshness · selected-host telemetry stays in Monitor"),
+		s.muted.Render("j/k select · cached inventory with explicit freshness"),
 		"",
 	}
-	nameWidth := min(28, max(16, width/6))
-	for _, host := range m.hosts {
-		gpu := "GPU unknown"
-		if len(host.GPUs) > 0 {
-			gpu = host.GPUs[0]
-			if len(host.GPUs) > 1 {
-				gpu += fmt.Sprintf(" +%d", len(host.GPUs)-1)
+	innerWidth := max(1, width-4)
+	if len(m.filtered) == 0 {
+		lines = append(lines, s.muted.Render("No hosts match the current filter."))
+	} else {
+		lines = append(lines, s.muted.Render(m.fleetInventoryHeader(innerWidth)))
+		rowBudget := max(1, height-7)
+		start, end := selectionWindow(len(m.filtered), m.cursor, rowBudget)
+		for position := start; position < end; position++ {
+			host := m.hosts[m.filtered[position]]
+			row := m.fleetInventoryRow(host, innerWidth)
+			if position == m.cursor {
+				lines = append(lines, s.selected.Render("› "+padCell(truncateText(row, max(1, innerWidth-2)), max(1, innerWidth-2))))
+			} else {
+				lines = append(lines, s.text.Render("  "+truncateText(row, max(1, innerWidth-2))))
 			}
 		}
-		freshness := "not scanned"
-		if !host.Updated.IsZero() {
-			freshness = relativeTime(host.Updated, time.Now())
-		}
-		line := padCell(truncateText(displayName(host), nameWidth), nameWidth) + "  " +
-			padCell(plainReachability(host.Reachability, m.probeTargets[host.Target]), 12) + "  " +
-			padCell(truncateText(valueOr(host.OS, "OS unknown"), 24), 24) + "  " +
-			padCell(truncateText(valueOr(host.Memory, "RAM unknown"), 12), 12) + "  " +
-			truncateText(gpu, max(12, width-nameWidth-62)) + "  " + freshness
-		lines = append(lines, s.text.Render(truncateText(line, max(1, width-6))))
-		if len(lines) >= height-3 {
-			break
-		}
+		position := fmt.Sprintf("%d–%d / %d hosts", start+1, end, len(m.filtered))
+		lines = append(lines, s.muted.Render(truncateText(position, innerWidth)))
 	}
 	return m.renderPanel(
 		s.panel.BorderLeft(false).BorderRight(false).BorderTop(false).BorderBottom(false).
 			Width(max(1, width)).Height(max(1, height)).Padding(1, 2),
 		strings.Join(lines, "\n"),
 	)
+}
+
+func (m dashboardModel) fleetInventoryHeader(width int) string {
+	switch {
+	case width >= 100:
+		return padCell("HOST", 22) + "  " + padCell("STATUS", 12) + "  " +
+			padCell("CPU", 6) + "  " + padCell("MEM", 7) + "  " + padCell("LOAD", 7) + "  " +
+			padCell("NETWORK", 22) + "  AGE"
+	case width >= 72:
+		return padCell("HOST", 18) + "  " + padCell("STATUS", 12) + "  " +
+			padCell("CPU", 6) + "  " + padCell("MEM", 7) + "  " + padCell("LOAD", 7) + "  AGE"
+	default:
+		return padCell("HOST", max(12, width-28)) + "  CPU / MEM / AGE"
+	}
+}
+
+func (m dashboardModel) fleetInventoryRow(host dashboardHost, width int) string {
+	status := plainReachability(host.Reachability, m.probeTargets[host.Target])
+	sample := m.telemetry[host.Target].Current
+	freshness := "not scanned"
+	if !sample.CollectedAt.IsZero() {
+		freshness = relativeTime(sample.CollectedAt, time.Now())
+	} else if !host.Updated.IsZero() {
+		freshness = relativeTime(host.Updated, time.Now())
+	}
+	cpu, memory, load, network := "—", "—", "—", "—"
+	if !sample.CollectedAt.IsZero() {
+		cpu = fmt.Sprintf("%.0f%%", sample.CPUUtilization)
+		if sample.MemoryTotal > 0 {
+			memory = fmt.Sprintf("%.0f%%", 100*float64(sample.MemoryUsed)/float64(sample.MemoryTotal))
+		}
+		load = fmt.Sprintf("%.2f", sample.LoadOne)
+		network = "↓ " + formatByteRate(sample.NetworkRXRate) + " ↑ " + formatByteRate(sample.NetworkTXRate)
+	}
+	switch {
+	case width >= 100:
+		return padCell(truncateText(displayName(host), 22), 22) + "  " +
+			padCell(truncateText(status, 12), 12) + "  " +
+			padCell(cpu, 6) + "  " + padCell(memory, 7) + "  " + padCell(load, 7) + "  " +
+			padCell(truncateText(network, 22), 22) + "  " + freshness
+	case width >= 72:
+		return padCell(truncateText(displayName(host), 18), 18) + "  " +
+			padCell(truncateText(status, 12), 12) + "  " +
+			padCell(cpu, 6) + "  " + padCell(memory, 7) + "  " + padCell(load, 7) + "  " + freshness
+	default:
+		stats := cpu + " / " + memory + " / " + freshness
+		nameWidth := max(12, width-lipgloss.Width(stats)-4)
+		return padCell(truncateText(displayName(host), nameWidth), nameWidth) + "  " +
+			truncateText(stats, max(8, width-nameWidth-2))
+	}
+}
+
+func (m dashboardModel) btopPaneView(s dashboardStyles, width, height int) string {
+	return m.btopPanelView(s, width, height, false, false)
+}
+
+func (m dashboardModel) btopPanelView(
+	s dashboardStyles, width, height int, leftBorder, topBorder bool,
+) string {
+	host := m.selectedHost()
+	entry := m.telemetry[host.Target]
+	innerWidth, frameHeight := btopFrameViewport(width, height, leftBorder, topBorder)
+	innerWidth = max(1, innerWidth)
+	frameHeight = max(1, frameHeight)
+	streamState := s.muted.Render("○ IDLE")
+	switch m.btopStreamState {
+	case "connecting":
+		streamState = s.warning.Render("◌ CONNECTING")
+	case "live":
+		age := relativeTime(m.btopStreamUpdatedAt, time.Now())
+		streamState = s.success.Render("● LIVE") + s.muted.Render(" · "+age)
+	case "unavailable":
+		streamState = s.muted.Render("○ UNAVAILABLE")
+	case "error":
+		streamState = s.failure.Render("× DISCONNECTED")
+	}
+	header := s.focus.Render("BTOP") + "  " + streamState
+	if host.Target != "" {
+		context := truncateText(displayName(host), max(8, innerWidth-lipgloss.Width(header)-2))
+		header += s.muted.Render("  ·  " + context)
+	}
+	lines := []string{header, s.muted.Render(strings.Repeat("─", innerWidth))}
+
+	if host.Target == "" {
+		lines = append(lines, "", s.muted.Render("Select a host to start."))
+	} else {
+		if m.btopStreamError != "" {
+			lines = append(lines, s.failure.Render(truncateText(m.btopStreamError, innerWidth)))
+		}
+		if entry.Current.BtopFrame != "" {
+			frame := fitTerminalView(entry.Current.BtopFrame, innerWidth, frameHeight)
+			lines = append(lines, strings.Split(frame, "\n")...)
+		} else {
+			message := "Opening a live remote terminal…"
+			switch m.btopStreamState {
+			case "unavailable":
+				message = "btop is not installed on this host"
+			case "error":
+				message = m.btopStreamError
+			case "live":
+				message = "Waiting for the first complete btop frame…"
+			}
+			lines = append(lines, "", s.muted.Render(truncateText(message, innerWidth)))
+		}
+	}
+	footer := "[j/k] host  ·  [r] reconnect  ·  [enter] SSH"
+	if len(lines) < height-2 {
+		lines = append(lines, "", s.muted.Render(truncateText(footer, innerWidth)))
+	}
+	panel := s.panel.BorderRight(false).BorderBottom(false)
+	panelWidth, panelHeight := width, height
+	if !leftBorder {
+		panel = panel.BorderLeft(false)
+	} else {
+		panelWidth--
+	}
+	if !topBorder {
+		panel = panel.BorderTop(false)
+	} else {
+		panelHeight--
+	}
+	return m.renderPanel(panel.Width(max(1, panelWidth)).Height(max(1, panelHeight)).Padding(0, 1),
+		strings.Join(lines, "\n"))
+}
+
+func btopFrameViewport(width, height int, leftBorder, topBorder bool) (columns, rows int) {
+	columns = width - 2 // one cell of content padding on each side
+	if leftBorder {
+		columns--
+	}
+	rows = height - 2 // title and divider
+	if topBorder {
+		rows--
+	}
+	return max(0, columns), max(0, rows)
 }
 
 func diskPercent(disk diskUsage) float64 {
@@ -3632,14 +4170,20 @@ func (m dashboardModel) settingsView() string {
 	} else {
 		values[settingExperimentalTabs] = "○ OFF · EXPERIMENTAL"
 	}
+	if m.experimentalFleetBtop {
+		values[settingExperimentalFleetBtop] = "● ON · EXPERIMENTAL"
+	} else {
+		values[settingExperimentalFleetBtop] = "○ OFF · EXPERIMENTAL"
+	}
 	details := map[settingsItem]string{
-		settingProfile:          "Apply a coordinated theme, contrast, and density preset; customize anything afterward.",
-		settingTheme:            "Preview palettes live, then use once or save the default.",
-		settingBackground:       "Opaque paints every cell; transparent preserves the terminal canvas.",
-		settingDensity:          "Adaptive follows the terminal; Compact and Comfortable override its rhythm.",
-		settingExperimentalTabs: "Optional Hosts, Monitor, and Fleet navigation for wide terminals.",
-		settingWorkspace:        "Choose the large-terminal view used when tabbed mode is off.",
-		settingConfig:           "Exit Nexus and open the YAML configuration in your editor.",
+		settingProfile:               "Apply a coordinated theme, contrast, and density preset; customize anything afterward.",
+		settingTheme:                 "Preview palettes live, then use once or save the default.",
+		settingBackground:            "Opaque paints every cell; transparent preserves the terminal canvas.",
+		settingDensity:               "Adaptive follows the terminal; Compact and Comfortable override its rhythm.",
+		settingExperimentalTabs:      "Optional Hosts, Monitor, and Fleet navigation for wide terminals.",
+		settingExperimentalFleetBtop: "Compressed live btop terminal for the selected Monitor host.",
+		settingWorkspace:             "Choose the large-terminal view used when tabbed mode is off.",
+		settingConfig:                "Exit Nexus and open the YAML configuration in your editor.",
 	}
 
 	lines := []string{
@@ -3660,18 +4204,21 @@ func (m dashboardModel) settingsView() string {
 				lines = append(lines, "", s.focus.Render("APPEARANCE"))
 			case settingExperimentalTabs:
 				lines = append(lines, "", s.focus.Render("NAVIGATION"))
+			case settingExperimentalFleetBtop:
+				lines = append(lines, "", s.focus.Render("EXPERIMENTAL"))
 			case settingConfig:
 				lines = append(lines, "", s.focus.Render("ADVANCED"))
 			}
 		}
 		label := map[settingsItem]string{
-			settingProfile:          "Visual profile",
-			settingTheme:            "Theme",
-			settingBackground:       "Background",
-			settingDensity:          "Density",
-			settingExperimentalTabs: "Workspace tabs",
-			settingWorkspace:        "Classic workspace",
-			settingConfig:           "Configuration file",
+			settingProfile:               "Visual profile",
+			settingTheme:                 "Theme",
+			settingBackground:            "Background",
+			settingDensity:               "Density",
+			settingExperimentalTabs:      "Workspace tabs",
+			settingExperimentalFleetBtop: "Monitor btop",
+			settingWorkspace:             "Classic workspace",
+			settingConfig:                "Configuration file",
 		}[item]
 		lines = append(lines, settingsRow(s, label, values[item], index == m.settingsCursor, innerWidth))
 	}
@@ -4200,12 +4747,23 @@ func (a *app) runDashboard() error {
 		program := tea.NewProgram(model, tea.WithAltScreen())
 		result, err := program.Run()
 		if err != nil {
+			model.closeBtopStreams()
+			model.closeFleetTelemetry()
 			return fmt.Errorf("dashboard failed: %w", err)
 		}
 		finalModel, ok := result.(dashboardModel)
 		if !ok || finalModel.choice.Action == "" {
+			if ok {
+				finalModel.closeBtopStreams()
+				finalModel.closeFleetTelemetry()
+			} else {
+				model.closeBtopStreams()
+				model.closeFleetTelemetry()
+			}
 			return nil
 		}
+		finalModel.closeBtopStreams()
+		finalModel.closeFleetTelemetry()
 		resumeReachability = make(map[string]reachabilityResult, len(finalModel.hosts))
 		for _, host := range finalModel.hosts {
 			resumeReachability[host.Target] = host.Reachability

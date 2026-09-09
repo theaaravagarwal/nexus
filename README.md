@@ -57,7 +57,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Choose a different install directory or version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/theaaravagarwal/nexus/main/install.sh | NEXUS_INSTALL_DIR=/usr/local/bin NEXUS_VERSION=v0.1.2 sh
+curl -fsSL https://raw.githubusercontent.com/theaaravagarwal/nexus/main/install.sh | NEXUS_INSTALL_DIR=/usr/local/bin NEXUS_VERSION=v0.1.3 sh
 ```
 
 The installer detects macOS/Linux and ARM64/x86-64, verifies the release checksum, and does not require `sudo` for the default location.
@@ -195,6 +195,8 @@ ui:
   workspace: workbench
   # Optional Hosts, Monitor, and Fleet tabs appear on wide terminals.
   experimental_tabs: false
+  # Compressed live btop terminal in the Monitor workspace.
+  monitor_btop: true
   pinned_actions: [ssh, info, storage]
 
 reachability:
@@ -249,6 +251,15 @@ Hosts are grouped with reachable machines first, then ordered by frequency and
 recency within each group. Probe completion preserves the selected target and
 active host filter.
 
+Fleet is a compact full-width inventory with adaptive CPU, memory, load,
+network, and freshness samples. Move with arrows or `j/k` to change hosts.
+Monitor shows one compressed live btop terminal for the selected host; press
+`r` to reconnect or `enter` to open SSH. **Monitor btop** under Settings can
+disable it, while `nexus top <host>` opens the full interactive monitor.
+
+Older configs using `ui.experimental_fleet_btop` remain supported. Saving the
+setting migrates that key to `ui.monitor_btop`.
+
 Useful configuration commands:
 
 ```bash
@@ -267,6 +278,7 @@ Config keys:
 - `ui.density`: `adaptive`, `compact`, or `comfortable`.
 - `ui.workspace`: `workbench`, `console`, or `fleet`.
 - `ui.experimental_tabs`: shows Hosts, Monitor, and Fleet navigation on wide terminals.
+- `ui.monitor_btop`: shows the selected host's live btop terminal in Monitor.
 - `ui.pinned_actions`: ordered built-in IDs or `command:<id>` references.
 - `ui.colors`: optional semantic overrides such as `focus` and `live`.
 - `reachability.*`: bounds saved-target DNS/TCP checks; these are not SSH/login latency checks.

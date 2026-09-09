@@ -29,7 +29,7 @@ host_profiles:
 		t.Fatal(err)
 	}
 	if cfg.UI.Theme != "nexus" || cfg.UI.Profile != "calm" || cfg.UI.Density != "adaptive" ||
-		cfg.UI.ExperimentalTabs || cfg.FullIndexDepth != 7 {
+		cfg.UI.ExperimentalTabs || !cfg.UI.ExperimentalFleetBtop || cfg.FullIndexDepth != 7 {
 		t.Fatalf("unexpected defaults: %#v", cfg)
 	}
 	if cfg.FZF.Theme != "cyberpunk" {
@@ -318,11 +318,70 @@ ui:
 	}
 }
 
+func TestSaveExperimentalFleetBtopUsesTypedBoolAndPreservesConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `# keep fleet note
+ui:
+  theme: nord
+  background: opaque
+  workspace: fleet
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveExperimentalFleetBtopToConfig(path, true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.UI.monitorBtopEnabled() || cfg.UI.Theme != "nord" || cfg.UI.Workspace != "fleet" {
+		t.Fatalf("config changed unexpectedly: %#v", cfg.UI)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "# keep fleet note") ||
+		!strings.Contains(string(saved), "monitor_btop: true") ||
+		strings.Contains(string(saved), "experimental_fleet_btop:") ||
+		strings.Contains(string(saved), `monitor_btop: "true"`) {
+		t.Fatalf("Monitor btop flag was not migrated as a bool with comments intact:\n%s", saved)
+	}
+}
+
+func TestLoadAppConfigMigratesLegacyFleetBtopAndNewKeyWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	for _, test := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "legacy enabled", raw: "ui:\n  experimental_fleet_btop: true\n", want: true},
+		{name: "legacy disabled", raw: "ui:\n  experimental_fleet_btop: false\n", want: false},
+		{name: "new key wins", raw: "ui:\n  monitor_btop: false\n  experimental_fleet_btop: true\n", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(test.raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadAppConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.UI.monitorBtopEnabled(); got != test.want {
+				t.Fatalf("monitor btop=%t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDefaultConfigIncludesSavedCommandExamples(t *testing.T) {
 	config := defaultConfigYAML()
 	for _, want := range []string{
 		"choose Settings", "profile: calm", "density: adaptive", "workspace: workbench",
-		"experimental_tabs: false", "pinned_actions:", "add: command:tmux",
+		"experimental_tabs: false", "monitor_btop: true", "pinned_actions:", "add: command:tmux",
 		"id: disk-usage", "disk usage", "journalctl -u app", "confirm: true", "exact user@host:port",
 	} {
 		if !strings.Contains(config, want) {

@@ -37,6 +37,57 @@ func TestBuildSSHArgsInteractiveTTY(t *testing.T) {
 	}
 }
 
+func TestBuildMonitoringSSHArgsUseCompressedFastFailProfile(t *testing.T) {
+	args, err := buildMonitoringSSHArgs("alice@example.com", false, "uptime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range [][2]string{
+		{"-o", "ConnectTimeout=3"},
+		{"-o", "BatchMode=yes"},
+		{"-o", "ConnectionAttempts=1"},
+		{"-o", "PreferredAuthentications=publickey"},
+		{"-o", "GSSAPIAuthentication=no"},
+		{"-o", "Compression=yes"},
+	} {
+		if !containsPair(args, pair[0], pair[1]) {
+			t.Fatalf("monitoring SSH args missing %q: %v", pair[1], args)
+		}
+	}
+	if !containsPair(args, "-o", "StrictHostKeyChecking=yes") {
+		t.Fatalf("monitoring SSH args missing strict host-key checking: %v", args)
+	}
+	if slices.Contains(args, "StrictHostKeyChecking=accept-new") {
+		t.Fatalf("monitoring SSH args unexpectedly allow automatic host-key enrollment: %v", args)
+	}
+}
+
+func TestBuildMonitoringSSHArgsUseStrictHostKeyCheckingForPTY(t *testing.T) {
+	args, err := buildMonitoringSSHArgs("alice@example.com", true, "btop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPair(args, "-o", "StrictHostKeyChecking=yes") {
+		t.Fatalf("PTY monitoring SSH args missing strict host-key checking: %v", args)
+	}
+	if slices.Contains(args, "StrictHostKeyChecking=accept-new") {
+		t.Fatalf("PTY monitoring SSH args unexpectedly allow automatic host-key enrollment: %v", args)
+	}
+}
+
+func TestBuildSSHArgsKeepsDefaultNoninteractiveHostKeyBehavior(t *testing.T) {
+	args, err := buildSSHArgs("alice@example.com", false, "uptime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPair(args, "-o", "StrictHostKeyChecking=accept-new") {
+		t.Fatalf("default noninteractive SSH args changed host-key behavior: %v", args)
+	}
+	if slices.Contains(args, "StrictHostKeyChecking=yes") {
+		t.Fatalf("default noninteractive SSH args unexpectedly use monitoring host-key policy: %v", args)
+	}
+}
+
 func TestFormatRemoteEndpointIPv6AndPort(t *testing.T) {
 	endpoint, err := formatRemoteEndpoint("alice@[2001:db8::1]:2222", "/tmp/a b", false)
 	if err != nil {
