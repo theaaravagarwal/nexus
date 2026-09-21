@@ -482,7 +482,8 @@ verify:
 	}
 	for _, want := range []string{
 		"Get-Command btop",
-		"conhost.exe --headless --width 100 --height 30 -- btop",
+		`conhost.exe --headless --width 100 --height 30 -- "' + $bin + '"`,
+		`graph_symbol = "braille"`, "rounded_corners = True", "Copy-Item", "Remove-Item -Recurse -Force $tmp",
 		"waitfor /t 3600 NexusBtop",
 		"GetStdHandle(-11)",
 		"WriteFile($h, $buf, 1",

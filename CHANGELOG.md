@@ -28,7 +28,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
-- Windows hosts: when the remote shell is cmd.exe, the Monitor runs btop4win inside a headless console over a non-PTY session (no WSL involved), with a PowerShell supervisor that tears it down when the session ends; requires btop4win on the SSH user's PATH. Compact telemetry (uptime, cores, memory, CPU, network, NVIDIA GPUs) and Fleet samples come from PowerShell performance counters instead of showing zeros.
+- Windows hosts: when the remote shell is cmd.exe, the Monitor runs btop4win inside a headless console over a non-PTY session (no WSL involved), with a PowerShell supervisor that tears it down when the session ends; requires btop4win on the SSH user's PATH. btop4win's shipped config draws "tty" block graphs with square corners, so the stream runs a temporary copy of its directory with braille graphs and rounded corners forced, without touching the user's config. Compact telemetry (uptime, cores, memory, CPU, network, NVIDIA GPUs) and Fleet samples come from PowerShell performance counters instead of showing zeros.
 - `docs/ARCHITECTURE.md` with design and implementation notes.
 - `Makefile` with `make check` and `make bench` targets.
 - Benchmarks for dashboard rendering and text truncation.

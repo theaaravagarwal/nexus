@@ -804,6 +804,11 @@ func detectRemotePlatform(ctx context.Context, target string) string {
 //     pseudoconsole (conhost.exe --headless), whose VT output streams over
 //     the ssh channel. The pseudoconsole closes as soon as its stdin ends,
 //     so `waitfor` keeps that stdin open without ever writing to it.
+//   - btop4win reads btop.conf from its own directory and its shipped default
+//     draws graphs with "tty" block glyphs and square corners, so the stream
+//     runs a temporary copy of that directory (resolving the winget symlink)
+//     with graph_symbol, rounded_corners and update_ms overridden, and
+//     removes the copy afterwards; the user's own config is never touched.
 //   - sshd on Windows kills nothing when the session ends (not even on a
 //     dropped connection), and with ControlMaster the per-connection sshd
 //     outlives every session, so the only reliable end-of-session signal is
@@ -813,7 +818,22 @@ func detectRemotePlatform(ctx context.Context, target string) string {
 //     write fails.
 func windowsBtopStreamScript(columns, rows int, signal string) string {
 	return fmt.Sprintf(`$ErrorActionPreference = 'SilentlyContinue'
-if (-not (Get-Command btop -ErrorAction SilentlyContinue)) { Write-Output '%s'; exit 0 }
+$exe = (Get-Command btop -ErrorAction SilentlyContinue).Source
+if (-not $exe) { Write-Output '%s'; exit 0 }
+$item = Get-Item $exe
+$real = $exe
+if ($item.LinkType -eq 'SymbolicLink' -and $item.Target) { $real = [string]($item.Target | Select-Object -First 1) }
+$tmp = Join-Path $env:TEMP ('nexus-btop-' + $PID)
+New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+Copy-Item -Path (Join-Path (Split-Path $real) '*') -Destination $tmp -Recurse -Force
+$conf = Join-Path $tmp 'btop.conf'
+$lines = @()
+if (Test-Path $conf) { $lines = Get-Content $conf | Where-Object { $_ -notmatch '^\s*(graph_symbol|rounded_corners|update_ms)\s*=' } }
+$lines += 'graph_symbol = "braille"'
+$lines += 'rounded_corners = True'
+$lines += 'update_ms = 1000'
+Set-Content -Path $conf -Value $lines
+$bin = Join-Path $tmp (Split-Path $real -Leaf)
 $sig = @'
 [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr GetStdHandle(int nStdHandle);
 [DllImport("kernel32.dll", SetLastError=true)] public static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
@@ -824,7 +844,7 @@ Write-Output '%s'
 [Console]::Out.Flush()
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = 'cmd.exe'
-$psi.Arguments = '/d /c waitfor /t 3600 %s 2>NUL | conhost.exe --headless --width %d --height %d -- btop'
+$psi.Arguments = '/d /c waitfor /t 3600 %s 2>NUL | conhost.exe --headless --width %d --height %d -- "' + $bin + '"'
 $psi.UseShellExecute = $false
 $p = [System.Diagnostics.Process]::Start($psi)
 $buf = [byte[]](0)
@@ -834,6 +854,7 @@ while (-not $p.HasExited) {
   if (-not $k::WriteFile($h, $buf, 1, [ref]$n, [IntPtr]::Zero)) { break }
 }
 if (-not $p.HasExited) { taskkill /F /T /PID $p.Id | Out-Null }
+Remove-Item -Recurse -Force $tmp
 `, btopUnavailableMarker, btopFrameMarker, signal, columns, rows)
 }
 
