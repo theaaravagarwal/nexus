@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -70,6 +71,23 @@ func Execute() error {
 	a, err := newApp()
 	if err != nil {
 		return err
+	}
+
+	// NEXUS_CPUPROFILE=path writes a CPU profile for the whole run; used to
+	// diagnose idle CPU in the dashboard (see docs/ARCHITECTURE.md).
+	if path := os.Getenv("NEXUS_CPUPROFILE"); path != "" {
+		file, err := os.Create(path)
+		if err != nil {
+			return fmt.Errorf("cpu profile: %w", err)
+		}
+		if err := pprof.StartCPUProfile(file); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("cpu profile: %w", err)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			_ = file.Close()
+		}()
 	}
 
 	root := a.newRootCmd()
