@@ -152,8 +152,15 @@ func (a *app) ensureBootstrap() error {
 		return errors.New("internal error: app is nil")
 	}
 
-	if err := ensurePrivateDirectory(a.configDir); err != nil {
+	if err := os.MkdirAll(a.configDir, 0o700); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %w", a.configDir, err)
+	}
+	// Tighten a pre-existing loose directory (e.g. 0755 from an older
+	// release) rather than refusing to start; the files inside are 0600.
+	if info, err := os.Stat(a.configDir); err == nil && info.IsDir() && info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(a.configDir, 0o700); err != nil {
+			return fmt.Errorf("failed to protect config directory %s: %w", a.configDir, err)
+		}
 	}
 
 	info, err := os.Stat(a.hostsFile)
