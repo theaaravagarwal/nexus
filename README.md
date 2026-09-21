@@ -121,7 +121,8 @@ Commands:
 - `host list`
 - `host add [user@host[:port]]`
 - `host remove [user@host[:port]]`
-- `config` (opens `~/.config/nexus/config.yaml` in your editor)
+- `theme|themes [list|preview]`
+- `config [edit|show|path]`
 - `doctor`
 - `completion bash|zsh|fish|powershell`
 - `version`

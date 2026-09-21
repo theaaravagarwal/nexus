@@ -329,7 +329,7 @@ ui:
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveExperimentalFleetBtopToConfig(path, true); err != nil {
+	if err := saveMonitorBtopToConfig(path, true); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadAppConfig(path)
@@ -475,5 +475,43 @@ func TestProfilesKeepPortSpecificOverrides(t *testing.T) {
 func TestCommandsRejectTerminalControlCharacters(t *testing.T) {
 	if got := sanitizeCommandText("uptime\x1b[2J"); got != "" {
 		t.Fatalf("unsafe command was retained: %q", got)
+	}
+}
+
+func TestCommandsForTargetPreservesConfirmFlag(t *testing.T) {
+	// Set up a configuration with a global confirm command and a host profile override
+	loadedConfig = appConfig{
+		Commands: []commandConfig{
+			{Name: "deploy", Command: "deploy-global", Confirm: true},
+		},
+		TagCommands: map[string][]commandConfig{},
+		HostProfiles: map[string]discoveryProfile{
+			"prod-host": {
+				Commands: []commandConfig{
+					{Name: "deploy", Command: "deploy-override", Confirm: false},
+				},
+			},
+		},
+	}
+
+	// Get commands for the prod-host
+	commands := commandsForTarget("prod-host")
+
+	// Find the deploy command
+	var deployCmd *commandConfig
+	for i := range commands {
+		if commands[i].Name == "deploy" {
+			deployCmd = &commands[i]
+			break
+		}
+	}
+
+	if deployCmd == nil {
+		t.Fatal("deploy command not found in merged commands")
+	}
+
+	// Confirm should be true (preserved from global, even though override is false)
+	if !deployCmd.Confirm {
+		t.Errorf("Confirm flag not preserved: got %v, want true", deployCmd.Confirm)
 	}
 }

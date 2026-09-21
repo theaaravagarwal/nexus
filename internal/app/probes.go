@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"strings"
@@ -47,7 +48,8 @@ func probeTarget(ctx context.Context, raw string, timeout time.Duration) reachab
 		result.Error = "cancelled"
 		return result
 	}
-	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
 		result.Status = reachTimeout
 	} else if isConnectionRefused(err) {
 		result.Status = reachRefused

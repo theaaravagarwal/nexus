@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -110,6 +111,13 @@ func ensureConfigFile(configPath string) error {
 		if info.Mode().Perm()&0o077 != 0 {
 			if err := os.Chmod(configPath, 0o600); err != nil {
 				return fmt.Errorf("failed to protect config file: %w", err)
+			}
+		}
+		// On Unix, verify the file is owned by the current uid
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			// os.Getuid() is only available on Unix; the type assertion already guards us
+			if int(stat.Uid) != os.Getuid() {
+				return fmt.Errorf("config file is not owned by current user: %s", configPath)
 			}
 		}
 		return ensureSavedCommandExamples(configPath)
@@ -294,10 +302,6 @@ func saveBackgroundToConfig(configPath, background string) error {
 
 func saveExperimentalTabsToConfig(configPath string, enabled bool) error {
 	return saveUIScalar(configPath, "experimental_tabs", "!!bool", strconv.FormatBool(enabled))
-}
-
-func saveExperimentalFleetBtopToConfig(configPath string, enabled bool) error {
-	return saveMonitorBtopToConfig(configPath, enabled)
 }
 
 func saveMonitorBtopToConfig(configPath string, enabled bool) error {
@@ -517,22 +521,14 @@ func loadAppConfig(configPath string) (appConfig, error) {
 	return cfg, nil
 }
 
-// loadConfigFromYAML preserves the existing internal API while the richer
-// configuration remains available through loadedConfig.
-func loadConfigFromYAML(configPath string) (map[string]discoveryProfile, int, fzfConfig, error) {
+// loadConfigFromYAML loads configuration from YAML and updates the global loadedConfig.
+func loadConfigFromYAML(configPath string) (int, fzfConfig, error) {
 	cfg, err := loadAppConfig(configPath)
 	if err != nil {
-		return nil, defaultFullIndexDepth, defaultFZFConfig(), err
+		return defaultFullIndexDepth, defaultFZFConfig(), err
 	}
 	loadedConfig = cfg
-	profiles := make(map[string]discoveryProfile, len(cfg.HostProfiles))
-	for host, profile := range cfg.HostProfiles {
-		key := profileLookupKey(host)
-		if key != "" {
-			profiles[key] = profile
-		}
-	}
-	return profiles, cfg.FullIndexDepth, cfg.FZF, nil
+	return cfg.FullIndexDepth, cfg.FZF, nil
 }
 
 func sanitizeFullIndexDepth(raw int) int {
@@ -668,7 +664,11 @@ func commandsForTarget(target string) []commandConfig {
 	order := []string{}
 	add := func(commands []commandConfig) {
 		for _, command := range commands {
-			if _, exists := merged[command.Name]; !exists {
+			if existing, exists := merged[command.Name]; exists {
+				// Preserve the Confirm flag: a host-profile override should not
+				// silently remove a global confirmation requirement.
+				command.Confirm = existing.Confirm || command.Confirm
+			} else {
 				order = append(order, command.Name)
 			}
 			merged[command.Name] = command
@@ -711,13 +711,6 @@ func profileForTarget(target string) discoveryProfile {
 		}
 	}
 	return discoveryProfile{}
-}
-
-func profileLookupKey(raw string) string {
-	if spec, err := parseConnectionTarget(raw); err == nil {
-		return strings.ToLower(spec.Host)
-	}
-	return strings.Trim(strings.ToLower(strings.TrimSpace(raw)), "[]")
 }
 
 func sanitizeLabel(value string) string {

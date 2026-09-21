@@ -152,7 +152,7 @@ func (a *app) ensureBootstrap() error {
 		return errors.New("internal error: app is nil")
 	}
 
-	if err := os.MkdirAll(a.configDir, 0o700); err != nil {
+	if err := ensurePrivateDirectory(a.configDir); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %w", a.configDir, err)
 	}
 
@@ -170,7 +170,8 @@ func (a *app) ensureBootstrap() error {
 		if err := os.WriteFile(a.hostsFile, []byte("[]\n"), 0o600); err != nil {
 			return err
 		}
-	} else if info.Mode().Perm()&0o077 != 0 {
+	}
+	if info, err := os.Stat(a.hostsFile); err == nil && info.Mode().Perm()&0o077 != 0 {
 		if err := os.Chmod(a.hostsFile, 0o600); err != nil {
 			return fmt.Errorf("failed to protect hosts file: %w", err)
 		}
@@ -180,7 +181,7 @@ func (a *app) ensureBootstrap() error {
 		return err
 	}
 	verboseLogging = a.verbose
-	_, cfgFullDepth, cfgFZF, err := loadConfigFromYAML(a.configFile)
+	cfgFullDepth, cfgFZF, err := loadConfigFromYAML(a.configFile)
 	if err != nil {
 		return err
 	}
@@ -381,6 +382,12 @@ func (a *app) appendHostIfNew(host string) (bool, error) {
 	}
 	host = target.String()
 
+	unlock, err := acquireFileLock(a.hostsFile)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
 	hosts, err := a.readHosts()
 	if err != nil {
 		return false, err
@@ -482,7 +489,7 @@ func (a *app) newPullCmd() *cobra.Command {
 			remoteSource := strings.TrimSpace(remoteSourceArg)
 			remoteIsWindows := false
 			if remoteSource == "" {
-				remoteSource, remoteIsWindows, err = Maps(host, ".", indexMode, "pull", true)
+				remoteSource, remoteIsWindows, err = maps(host, ".", indexMode, "pull", true)
 				if errors.Is(err, errCancelled) {
 					return nil
 				}
@@ -505,7 +512,7 @@ func (a *app) newPullCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("failed to resolve home directory: %w", err)
 				}
-				localDest, _, err = Maps("", localStart, indexMode, "pull", false)
+				localDest, _, err = maps("", localStart, indexMode, "pull", false)
 				if errors.Is(err, errCancelled) {
 					return nil
 				}
@@ -515,13 +522,17 @@ func (a *app) newPullCmd() *cobra.Command {
 			}
 			localDest = filepath.Clean(localDest)
 			localDest = ensureTrailingSlashForMode(localDest, false)
+			localDestForMedia := filepath.Clean(localDest)
 			localDest = normalizeLocalPathForRsync(localDest)
 
 			source, err := formatRemoteEndpoint(host, remoteSource, remoteIsWindows)
 			if err != nil {
 				return err
 			}
-			targetSpec, _ := parseConnectionTarget(host)
+			targetSpec, err := parseConnectionTarget(host)
+			if err != nil {
+				return err
+			}
 			if err := runRsync(source, localDest, rsyncOptions{
 				forceRemoteRsyncPath: remoteIsWindows || stabilityProfile,
 				stabilityProfile:     stabilityProfile,
@@ -531,7 +542,7 @@ func (a *app) newPullCmd() *cobra.Command {
 				return err
 			}
 
-			maybeOpenMedia(remoteSource)
+			maybeOpenMedia(localDestForMedia, remoteSource)
 			if !a.dryRun {
 				if err := a.recordSuccess(host); err != nil {
 					logVerbose("failed to record host activity: %v", err)
@@ -579,7 +590,7 @@ func (a *app) newPushCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("failed to resolve home directory: %w", err)
 				}
-				localPath, _, err = Maps("", localStart, indexMode, "push", false)
+				localPath, _, err = maps("", localStart, indexMode, "push", false)
 				if errors.Is(err, errCancelled) {
 					return nil
 				}
@@ -609,7 +620,7 @@ func (a *app) newPushCmd() *cobra.Command {
 			remoteDir := strings.TrimSpace(remoteDirArg)
 			remoteIsWindows := false
 			if remoteDir == "" {
-				remoteDir, remoteIsWindows, err = Maps(host, ".", indexMode, "push", true)
+				remoteDir, remoteIsWindows, err = maps(host, ".", indexMode, "push", true)
 				if errors.Is(err, errCancelled) {
 					return nil
 				}
@@ -632,7 +643,10 @@ func (a *app) newPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			targetSpec, _ := parseConnectionTarget(host)
+			targetSpec, err := parseConnectionTarget(host)
+			if err != nil {
+				return err
+			}
 			if err := runRsync(source, target, rsyncOptions{
 				forceRemoteRsyncPath: remoteIsWindows || stabilityProfile,
 				stabilityProfile:     stabilityProfile,
@@ -797,10 +811,6 @@ func getRemotePathsInternal(user, host, remotePath string, fullIndex bool, actio
 	return dedupeKeepOrder(out), windowsHost, nil
 }
 
-func GetRemoteLayer(user, host, remotePath string, fullIndex bool, action string) ([]string, bool, error) {
-	return getRemotePathsInternal(user, host, remotePath, fullIndex, action)
-}
-
 func buildRemoteDiscoveryCommand(remotePath string, fullIndex bool, action string, ignoreRegex string, forceUnix bool, autoWindows bool) string {
 	if forceUnix || !autoWindows {
 		return buildUnixDiscoveryCommand(remotePath, fullIndex, action, ignoreRegex)
@@ -934,7 +944,7 @@ func splitUserHost(raw string) (string, string) {
 	return target.User, target.Host
 }
 
-func Maps(host, startPath, indexMode, action string, isRemote bool) (string, bool, error) {
+func maps(host, startPath, indexMode, action string, isRemote bool) (string, bool, error) {
 	indexMode = normalizeRemoteIndexMode(indexMode)
 	fullIndex := indexMode == "full"
 	currentPath := strings.TrimSpace(startPath)
@@ -962,7 +972,7 @@ func Maps(host, startPath, indexMode, action string, isRemote bool) (string, boo
 			err         error
 		)
 		if isRemote {
-			items, windowsHost, err = GetRemoteLayer(user, cleanHost, currentPath, fullIndex, action)
+			items, windowsHost, err = getRemotePathsInternal(user, cleanHost, currentPath, fullIndex, action)
 			if err != nil {
 				return "", detectedWindows, err
 			}
@@ -1117,7 +1127,7 @@ func normalizeRemoteIndexMode(mode string) string {
 }
 
 func getGlobalIgnoreRegex() string {
-	return `(\\.o$|\\.obj$|\\.a$|\\.lib$|\\.so$|\\.dll$|\\.dylib$|\\.out$|\\.exe$|target(/|$)|build(/|$)|CMakeFiles(/|$)|CMakeCache\\.txt$|ipch(/|$)|\\.vs(/|$)|\\.pdb$|\\.d$|first$|compression$|.*\\.bin$|.*\\.acomp$|\\.class$|\\.jar$|\\.war$|\\.ear$|\\.metadata(/|$)|\\.recommenders(/|$)|\\.gradle(/|$)|bin(/|$)|obj(/|$)|lib(/|$)|include(/|$)|share(/|$)|node_modules(/|$)|\\.venv(/|$)|env(/|$)|venv(/|$)|ENV(/|$)|__pycache__(/|$)|\\.pyc$|\\.parcel-cache(/|$)|dist(/|$)|\\.yarn(/|$)|package-lock\\.json$|\\.git(/|$)|\\.vscode(/|$)|\\.idea(/|$)|\\.DS_Store$|Thumbs\\.db$|bot\\.js$|fireworks(/|$))`
+	return `(\.o$|\.obj$|\.a$|\.lib$|\.so$|\.dll$|\.dylib$|\.out$|\.exe$|target(/|$)|build(/|$)|CMakeFiles(/|$)|CMakeCache\.txt$|ipch(/|$)|\.vs(/|$)|\.pdb$|\.d$|first$|compression$|.*\.bin$|.*\.acomp$|\.class$|\.jar$|\.war$|\.ear$|\.metadata(/|$)|\.recommenders(/|$)|\.gradle(/|$)|(^|/)bin(/|$)|(^|/)obj(/|$)|(^|/)lib(/|$)|(^|/)include(/|$)|(^|/)share(/|$)|node_modules(/|$)|\.venv(/|$)|(^|/)env(/|$)|(^|/)venv(/|$)|(^|/)ENV(/|$)|__pycache__(/|$)|\.pyc$|\.parcel-cache(/|$)|dist(/|$)|\.yarn(/|$)|package-lock\.json$|\.git(/|$)|\.vscode(/|$)|\.idea(/|$)|\.DS_Store$|Thumbs\.db$|bot\.js$|fireworks(/|$))`
 }
 
 func parseGitignorePatterns(content string) []string {
@@ -1169,6 +1179,9 @@ func mergeIgnorePatterns(globalRegex string, custom []string) string {
 	customRegex = strings.TrimSpace(customRegex)
 	if customRegex == "" {
 		return globalRegex
+	}
+	if globalRegex == "" {
+		return customRegex
 	}
 	return globalRegex[:len(globalRegex)-1] + "|" + strings.Trim(customRegex, "()") + ")"
 }
@@ -1459,6 +1472,13 @@ func (a *app) newHostCmd() *cobra.Command {
 				return fmt.Errorf("invalid host format: %w", err)
 			}
 			target := targetSpec.String()
+
+			unlock, err := acquireFileLock(a.hostsFile)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+
 			hosts, err := a.readHosts()
 			if err != nil {
 				return err
@@ -1833,6 +1853,7 @@ func buildRsyncArgs(rsyncBin, source, destination string, opts rsyncOptions) []s
 		// Consider ControlMaster/ControlPersist in ~/.ssh/config to reuse one connection.
 		"-e", buildRsyncSSHCommand(opts.sshPort),
 		"--blocking-io",
+		"--protect-args",
 	}
 	if opts.forceRemoteRsyncPath {
 		args = append(args, "--rsync-path=rsync")
@@ -1928,7 +1949,7 @@ func formatRemoteEndpoint(host, remotePath string, quoteForWindows bool) (string
 	return fmt.Sprintf("%s:%s", target.rsyncDestination(), normalized), nil
 }
 
-func maybeOpenMedia(remotePath string) {
+func maybeOpenMedia(localDest, remotePath string) {
 	if runtime.GOOS != "darwin" {
 		return
 	}
@@ -1945,7 +1966,14 @@ func maybeOpenMedia(remotePath string) {
 		return
 	}
 
-	openCmd := exec.Command("open", localName)
+	localDest = filepath.Clean(localDest)
+	localFile := filepath.Join(localDest, localName)
+	info, err := os.Stat(localFile)
+	if err != nil || info.IsDir() {
+		return
+	}
+
+	openCmd := exec.Command("open", localFile)
 	openCmd.Stdin = os.Stdin
 	openCmd.Stdout = os.Stdout
 	openCmd.Stderr = os.Stderr

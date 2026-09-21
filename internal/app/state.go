@@ -137,7 +137,8 @@ func atomicWritePrivate(path string, raw []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".state-*.tmp")
+	basePrefix := "." + filepath.Base(path) + "-"
+	tmp, err := os.CreateTemp(filepath.Dir(path), basePrefix+"*.tmp")
 	if err != nil {
 		return err
 	}
@@ -175,7 +176,7 @@ func recordHostSuccess(path, target string, now time.Time) error {
 }
 
 func updateState(path string, mutate func(*nexusState)) error {
-	unlock, err := acquireStateLock(path)
+	unlock, err := acquireFileLock(path)
 	if err != nil {
 		return err
 	}
@@ -189,6 +190,10 @@ func updateState(path string, mutate func(*nexusState)) error {
 }
 
 func acquireStateLock(path string) (func(), error) {
+	return acquireFileLock(path)
+}
+
+func acquireFileLock(path string) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -207,7 +212,7 @@ func acquireStateLock(path string) (func(), error) {
 			continue
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("state file is busy: %s", path)
+			return nil, fmt.Errorf("file is busy: %s", path)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
