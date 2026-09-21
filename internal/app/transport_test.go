@@ -48,11 +48,13 @@ func TestBuildMonitoringSSHArgsUseCompressedFastFailProfile(t *testing.T) {
 		{"-o", "ConnectionAttempts=1"},
 		{"-o", "PreferredAuthentications=publickey"},
 		{"-o", "GSSAPIAuthentication=no"},
-		{"-o", "Compression=yes"},
 	} {
 		if !containsPair(args, pair[0], pair[1]) {
 			t.Fatalf("monitoring SSH args missing %q: %v", pair[1], args)
 		}
+	}
+	if slices.Contains(args, "Compression=yes") {
+		t.Fatalf("non-PTY monitoring SSH args unexpectedly have compression: %v", args)
 	}
 	if !containsPair(args, "-o", "StrictHostKeyChecking=yes") {
 		t.Fatalf("monitoring SSH args missing strict host-key checking: %v", args)
@@ -72,6 +74,9 @@ func TestBuildMonitoringSSHArgsUseStrictHostKeyCheckingForPTY(t *testing.T) {
 	}
 	if slices.Contains(args, "StrictHostKeyChecking=accept-new") {
 		t.Fatalf("PTY monitoring SSH args unexpectedly allow automatic host-key enrollment: %v", args)
+	}
+	if !containsPair(args, "-o", "Compression=yes") {
+		t.Fatalf("PTY monitoring SSH args missing compression: %v", args)
 	}
 }
 

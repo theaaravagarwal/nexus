@@ -22,6 +22,8 @@ const (
 	fleetTelemetryRetryMin       = 10 * time.Second
 	fleetTelemetryRetryMax       = 2 * time.Minute
 	fleetTelemetryScannerMaxSize = 16 * 1024
+	fleetTelemetryRotateInterval = 30 * time.Second
+	fleetTelemetryGracePeriod    = fleetTelemetryRotateInterval
 )
 
 type fleetTelemetrySpec struct {
@@ -45,26 +47,30 @@ type fleetTelemetryPoolClosedMsg struct{}
 type fleetTelemetryRotateMsg struct{}
 
 type fleetTelemetryPool struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	sessions map[string]*fleetTelemetrySession
-	updates  chan fleetTelemetryEvent
-	nextGen  uint64
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	sessions      map[string]*fleetTelemetrySession
+	idleSessions  map[string]*fleetTelemetrySession
+	updates       chan fleetTelemetryEvent
+	nextGen       uint64
+	totalSessions int
 }
 
 type fleetTelemetrySession struct {
 	generation uint64
 	interval   time.Duration
 	cancel     context.CancelFunc
+	graceUntil time.Time
 }
 
 func newFleetTelemetryPool() *fleetTelemetryPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &fleetTelemetryPool{
 		ctx: ctx, cancel: cancel,
-		sessions: make(map[string]*fleetTelemetrySession),
-		updates:  make(chan fleetTelemetryEvent, 64),
+		sessions:     make(map[string]*fleetTelemetrySession),
+		idleSessions: make(map[string]*fleetTelemetrySession),
+		updates:      make(chan fleetTelemetryEvent, 64),
 	}
 }
 
@@ -82,23 +88,68 @@ func (p *fleetTelemetryPool) sync(specs []fleetTelemetrySpec) {
 		}
 	}
 	p.mu.Lock()
+	now := time.Now()
+
+	// Expire grace period for idle sessions that have been absent too long
+	for target, session := range p.idleSessions {
+		if now.After(session.graceUntil) {
+			session.cancel()
+			delete(p.idleSessions, target)
+			p.totalSessions--
+		}
+	}
+
+	// Process active sessions: remove, update, or move to idle
 	for target, session := range p.sessions {
 		spec, keep := desired[target]
 		if keep && spec.Interval == session.interval {
 			delete(desired, target)
 			continue
 		}
-		session.cancel()
-		delete(p.sessions, target)
+		// Moving to idle grace period or canceling
+		if keep && spec.Interval != session.interval {
+			// Interval changed, cancel and start fresh
+			session.cancel()
+			delete(p.sessions, target)
+		} else {
+			// Not in desired list anymore, move to idle
+			session.cancel()
+			delete(p.sessions, target)
+			session.graceUntil = now.Add(fleetTelemetryGracePeriod)
+			p.idleSessions[target] = session
+		}
 	}
+
+	// Check if we can reuse idle sessions for new specs
+	for target, spec := range desired {
+		if idleSession, ok := p.idleSessions[target]; ok {
+			// Reuse the idle session
+			delete(desired, target)
+			idleSession.interval = spec.Interval
+			p.sessions[target] = idleSession
+			delete(p.idleSessions, target)
+			// Restart the session with new context
+			ctx, cancel := context.WithCancel(p.ctx)
+			idleSession.cancel = cancel
+			go p.run(ctx, target, idleSession)
+			continue
+		}
+	}
+
+	// Create new sessions for remaining specs, respecting the session limit
 	for target, spec := range desired {
 		if p.ctx.Err() != nil {
 			break
+		}
+		// Check if we can create a new session (bounded by max streams + 4 grace slots)
+		if len(p.sessions)+len(p.idleSessions) >= fleetTelemetryMaxStreams+4 {
+			continue
 		}
 		p.nextGen++
 		ctx, cancel := context.WithCancel(p.ctx)
 		session := &fleetTelemetrySession{generation: p.nextGen, interval: spec.Interval, cancel: cancel}
 		p.sessions[target] = session
+		p.totalSessions++
 		go p.run(ctx, target, session)
 	}
 	p.mu.Unlock()
@@ -152,7 +203,11 @@ func (p *fleetTelemetryPool) close() {
 	for _, session := range p.sessions {
 		session.cancel()
 	}
+	for _, session := range p.idleSessions {
+		session.cancel()
+	}
 	p.sessions = make(map[string]*fleetTelemetrySession)
+	p.idleSessions = make(map[string]*fleetTelemetrySession)
 	p.mu.Unlock()
 }
 
@@ -167,7 +222,7 @@ func (p *fleetTelemetryPool) current(target string, generation uint64) bool {
 }
 
 func fleetTelemetryRotateTick() tea.Cmd {
-	return tea.Tick(15*time.Second, func(time.Time) tea.Msg { return fleetTelemetryRotateMsg{} })
+	return tea.Tick(fleetTelemetryRotateInterval, func(time.Time) tea.Msg { return fleetTelemetryRotateMsg{} })
 }
 
 func waitForFleetTelemetry(pool *fleetTelemetryPool) tea.Cmd {

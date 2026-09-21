@@ -37,14 +37,15 @@ var (
 )
 
 type app struct {
-	configDir   string
-	configFile  string
-	hostsFile   string
-	stateFile   string
-	dryRun      bool
-	verbose     bool
-	sshPort     int
-	remoteIndex string
+	configDir    string
+	configFile   string
+	hostsFile    string
+	stateFile    string
+	dryRun       bool
+	verbose      bool
+	sshPort      int
+	remoteIndex  string
+	bootstrapped bool
 }
 
 func newApp() (*app, error) {
@@ -152,6 +153,10 @@ func (a *app) ensureBootstrap() error {
 		return errors.New("internal error: app is nil")
 	}
 
+	if a.bootstrapped {
+		return nil
+	}
+
 	if err := os.MkdirAll(a.configDir, 0o700); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %w", a.configDir, err)
 	}
@@ -195,6 +200,7 @@ func (a *app) ensureBootstrap() error {
 	fullIndexDepth = cfgFullDepth
 	fzfUIConfig = cfgFZF
 
+	a.bootstrapped = true
 	return nil
 }
 
@@ -1678,9 +1684,11 @@ func buildSSHArgsForTraffic(
 			"-o", "ConnectionAttempts=1",
 			"-o", "PreferredAuthentications=publickey",
 			"-o", "GSSAPIAuthentication=no",
-			"-o", "Compression=yes",
 			"-o", "StrictHostKeyChecking=yes",
 		)
+		if interactive {
+			args = append(args, "-o", "Compression=yes")
+		}
 	}
 	args = append(args, sshMultiplexArgs()...)
 	if target.Port != defaultSSHPort {
