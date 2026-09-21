@@ -1,0 +1,20 @@
+ ◆ NEXUS                                  6 saved · 3 up   
+─────────────────────────────────────────────────────────  
+                                                           
+ HOSTS · j/k move                                          
+ [/] find · online first · frequent within status          
+                                                           
+ › edge-1 ● 8ms                                            
+ alice@edge-1.example.com 1h ago                           
+   build.example.com                              ● 15ms   
+   bob@build.example.com:2222                     2h ago   
+   db.example.internal                         ! refused   
+   carol@db.example.internal                      3h ago   
+   10.0.0.5                                    × timeout   
+   dave@10.0.0.5                                  4h ago   
+   archive.example.com                         ○ unknown   
+   erin@archive.example.com                       5h ago   
+ 1–5 / 6 ↓                                                 
+                                                           
+─────────────────────────────────────────────────────────  
+ enter · j/k · / find · a actions · o activity             

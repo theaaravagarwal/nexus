@@ -1,0 +1,40 @@
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                      ┌──────────────────────────────────────────────────────────────────────────┐                      
+                      │                                                                          │                      
+                      │  NEXUS KEYS                                                              │                      
+                      │                                                                          │                      
+                      │  WORKSPACE                                                               │                      
+                      │  ↑/↓ or j/k   move between hosts                                         │                      
+                      │  enter        connect with SSH                                           │                      
+                      │  /            find hosts                                                 │                      
+                      │  a            all actions and saved commands                             │                      
+                      │  r            refresh selected host details                              │                      
+                      │  o            open or close Activity                                     │                      
+                      │  ,            open settings                                              │                      
+                      │  h            open this key reference                                    │                      
+                      │  q            quit Nexus                                                 │                      
+                      │                                                                          │                      
+                      │  LISTS         arrows or j/k move · enter choose · esc back              │                      
+                      │  MONITOR       l/right focus actions · h/left return                     │                      
+                      │  ACTION FILTER / start · backspace edit · enter first match              │                      
+                      │  THEME         s save default                                            │                      
+                      │  FAILED SCAN   r retry                                                   │                      
+                      │  OUTPUT        r run again                                               │                      
+                      │  CONFIRM       y run · esc cancel                                        │                      
+                      │  SSH AUTH      OpenSSH handles interactive prompts                       │                      
+                      │                                                                          │                      
+                      │  ● online   ! refused   × unavailable   ◌ checking                       │                      
+                      │                                                                          │                      
+                      └──────────────────────────────────────────────────────────────────────────┘                      
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        

@@ -1,0 +1,30 @@
+ ◆ NEXUS  choose a host                                                       6 hosts  ● 3 online   
+──────────────────────────────────────────────────────────────────────────────────────────────────  
+                                     │                                                              
+ HOSTS                               │  edge-1                                                      
+ [/] find · online first · frequ…    │  alice@edge-1.example.com                                    
+                                     │  ● 8ms  ·  used 1h ago                                       
+ › edge-1 ● 8ms                      │  tags  gpu · prod                                            
+ alice@edge-1.examp… 1h ago          │                                                              
+   build.example.com         ● 15ms  │  SYSTEM                                    updated Jan 10    
+   bob@build.example.…       2h ago  │  OS       Linux 6.8                                          
+   db.example.internal    ! refused  │  CPU      8x Cortex-A76                                      
+   carol@db.example.i…       3h ago  │  GPU      NVIDIA RTX 4080 · 16GB VRAM                        
+   10.0.0.5               × timeout  │  Memory   12GB / 32GB                                        
+   dave@10.0.0.5             4h ago  │                                                              
+   archive.example.com    ○ unknown  │  STORAGE                                                     
+   erin@archive.examp…       5h ago  │  sda1 · /            322.1 GB / 1.1 TB   ██░░░░  30%         
+   gpu-node.example.com      ● 43ms  │  sdb1 · /data        966.4 GB / 1.1 TB   █████░  90%         
+   frank@gpu-node.exa…       6h ago  │                                                              
+ 1–6 / 6                             │  TOOLS & COMMANDS                                            
+                                     │  Tools    tmux · docker · git                                
+                                     │  Uptime Show load and uptime                                 
+                                     │  Disk report Full df -h listing                              
+                                     │  [a] choose an action                                        
+                                     │                                                              
+                                     │                                                              
+                                     │                                                              
+                                     │                                                              
+                                     │                                                              
+──────────────────────────────────────────────────────────────────────────────────────────────────  
+  [enter]  connect   [j/k]  move   [/]  find   [a]  actions   [o]  activity          [h] all keys   

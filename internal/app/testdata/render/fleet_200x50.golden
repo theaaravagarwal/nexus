@@ -1,0 +1,50 @@
+ ◆ NEXUS   HOSTS   MONITOR   FLEET                                                                                                                                                6 hosts  ● 3 online   
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────  
+                                                                                                                                                                                                        
+  FLEET WORKSPACE                                                                                                                                                                                       
+  j/k select · cached inventory with explicit freshness                                                                                                                                                 
+                                                                                                                                                                                                        
+  HOST                    STATUS        CPU     MEM      LOAD     NETWORK                 AGE                                                                                                           
+  › edge-1 ● 8ms 38% 19% 1.24 ↓ 2.6 MB/s ↑ 524.3 KB… Jan 10                                                                                                                                             
+    build.example.com ● 15ms — — — — Jan 10                                                                                                                                                             
+    db.example.internal ! refused — — — — Jan 10                                                                                                                                                        
+    10.0.0.5 × timeout — — — — Jan 10                                                                                                                                                                   
+    archive.example.com ○ unknown — — — — Jan 10                                                                                                                                                        
+    gpu-node.example.com ● 43ms 12% 12% 0.40 ↓ 1.0 KB/s ↑ 1.0 KB/s Jan 10                                                                                                                               
+  1–6 / 6 hosts                                                                                                                                                                                         
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────  
+  [tab]  switch tab   [←/→]  navigate   [,]  settings   [h]  keys                                                                                                                        [h] all keys   

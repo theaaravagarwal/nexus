@@ -1,0 +1,40 @@
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                       ┌────────────────────────────────────────────────────────────────────────┐                       
+                       │                                                                        │                       
+                       │  ACTIONS                                                               │                       
+                       │  edge-1 · alice@edge-1.example.com                                     │                       
+                       │  [/] filter actions · [↑/↓ or j/k] move                                │                       
+                       │  › Connect Key, password, or MFA                                       │                       
+                       │    Refresh info         Update system details                          │                       
+                       │    Storage              Inspect storage volumes                        │                       
+                       │    Copy key             Set up passwordless SSH                        │                       
+                       │    Pull                 Download from remote                           │                       
+                       │    Push                 Upload to remote                               │                       
+                       │    Check host           Refresh this connection                        │                       
+                       │    Check all            Refresh every connection                       │                       
+                       │    Monitor              Open system monitor                            │                       
+                       │    Network              Open network diagnostics                       │                       
+                       │    Fleet                Inspect saved hosts                            │                       
+                       │    Settings             Themes, workspace, and config                  │                       
+                       │    Uptime               Show load and uptime                           │                       
+                       │    Disk report          Full df -h listing                             │                       
+                       │  OpenSSH connection                                                    │                       
+                       │  [enter] choose [esc] close                                            │                       
+                       │                                                                        │                       
+                       └────────────────────────────────────────────────────────────────────────┘                       
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        

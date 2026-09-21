@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -73,6 +74,14 @@ type dashboardHost struct {
 	Updated      time.Time
 	LastUsed     time.Time
 	Reachability reachabilityResult
+
+	// DisplayName and MeaningfulDisks are derived from Alias/Target/Disks at
+	// the two points those fields are ever set (construction and metadata
+	// refresh) instead of being recomputed by every render. Target/Alias
+	// never change after a host is created, and Disks is only replaced
+	// wholesale (never mutated in place), so these caches cannot go stale.
+	DisplayName     string
+	MeaningfulDisks []diskUsage
 }
 
 type dashboardCommand struct {
@@ -268,6 +277,97 @@ type dashboardModel struct {
 	btopResizeGeneration   uint64
 	btopResizePending      bool
 	activities             []activityEvent
+
+	// actionUsageGen counts every mutation of actionUses (see
+	// recordActionUsage). It is an ordinary value field mutated through the
+	// same pointer-receiver Update path as every other counter on this
+	// model; it exists purely as a cheap cache-invalidation signal for
+	// commandsCache.
+	actionUsageGen uint64
+
+	// renderCache and commandsCache are pointer-typed cache fields. View()
+	// and its helpers have a value receiver (Bubble Tea semantics: a
+	// dashboardModel is copied on every Update/View call), so a cache field
+	// cannot be repopulated by simply assigning m.field = ...; that mutation
+	// would be lost the moment the method returns. Instead these fields
+	// hold a pointer allocated once, in the constructor, and every later
+	// value-copy of dashboardModel (produced by Update, by value-receiver
+	// helpers, by "m := dashboardModel{...}" in bench/tests, etc.) carries
+	// the *same* pointer forward. Mutating *m.renderCache from inside a
+	// value-receiver method is safe here specifically because Bubble Tea
+	// drives Update and View sequentially on a single goroutine -- there is
+	// never a concurrent reader or writer, so this is not a data race, only
+	// state shared across otherwise-independent value copies. Code built
+	// directly as a struct literal (bypassing the constructor, e.g. the
+	// small probe models in minBtopTerminalWidth/Height) leaves these
+	// pointers nil; every accessor below treats nil as "cache disabled" and
+	// falls back to computing fresh, so that is only a missed optimization,
+	// never a correctness issue.
+	renderCache    *dashboardRenderCache
+	commandsCache  *dashboardCommandsCache
+	btopFrameCache *dashboardBtopFrameCache
+}
+
+// dashboardBtopFrameCache memoizes the fitTerminalView + strings.Split done
+// on the live btop frame every time the console/monitor panel renders. A new
+// remote frame only arrives every second or so (btop_stream.go), far less
+// often than View() gets called (telemetry ticks, cursor moves, resizes),
+// so this is keyed on btopStreamFrames -- bumped exactly when
+// entry.Current.BtopFrame actually changes -- plus the viewport size the
+// frame was fit to.
+type dashboardBtopFrameCache struct {
+	valid  bool
+	frames uint64
+	width  int
+	height int
+	lines  []string
+}
+
+// dashboardRenderCache memoizes the theme/plain-derived values that used to
+// be recomputed from scratch on every single View() call: the dashboardStyles
+// bundle (styles()) and the raw ANSI prefix strings paintTerminalSurface
+// needs for the panel-surface and whole-screen backgrounds. All of it is
+// invalidated together by comparing plain+theme, since every field here is a
+// pure function of those two inputs.
+type dashboardRenderCache struct {
+	valid bool
+	plain bool
+	theme theme
+
+	styles dashboardStyles
+
+	// textForegroundPrefix/surfaceBackgroundPrefix/screenBackgroundPrefix
+	// are the raw ANSI escape sequences terminalStylePrefix would otherwise
+	// reconstruct (via a throwaway lipgloss.Style.Render call) on every
+	// renderPanel/finishView call. Empty means "this color is unset for the
+	// current theme", matching the old per-call guards.
+	textForegroundPrefix    string
+	surfaceBackgroundPrefix string
+	screenBackgroundPrefix  string
+
+	// footerHintsDefault/footerHintsTabs are the fully-rendered "[key]
+	// label" fragments footerView joins together every frame. Their text
+	// and count are fixed (they don't depend on host/telemetry state, only
+	// on whether tabs are visible), so -- like styles() -- there is no
+	// reason to pay for keyHint's two lipgloss.Style.Render calls per hint,
+	// per frame, when the theme hasn't changed.
+	footerHintsDefault []string
+	footerHintsTabs    []string
+}
+
+// dashboardCommandsCache memoizes availableCommands(), which otherwise
+// rebuilds the command list and re-derives commandsForTarget/profileForTarget
+// (a map iteration + sort.Strings over every configured host profile) on
+// every frame. It is keyed on the selected target and actionUsageGen, the
+// only two things that can change the resulting (unsorted-then-sorted) list
+// during a single dashboard session; PinnedActions only change via editing
+// the YAML config on disk, never from inside a running session.
+type dashboardCommandsCache struct {
+	valid  bool
+	target string
+	gen    uint64
+
+	commands []dashboardCommand
 }
 
 const (
@@ -315,6 +415,9 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 		telemetry:             make(map[string]hostTelemetry),
 		telemetryGen:          1,
 		telemetryFocused:      true,
+		renderCache:           &dashboardRenderCache{},
+		commandsCache:         &dashboardCommandsCache{},
+		btopFrameCache:        &dashboardBtopFrameCache{},
 	}
 	if model.experimentalTabs {
 		model.workspace = "workbench"
@@ -356,6 +459,12 @@ func newDashboardModelWithState(hosts []string, state nexusState, now time.Time)
 				Target: target,
 				Status: reachUnknown,
 			},
+			// activity.Disks is already meaningfulStorageDisks-filtered
+			// above; MeaningfulDisks is still computed with its own call
+			// (rather than aliasing Disks) so it stays correct even if a
+			// future change stops pre-filtering Disks here.
+			DisplayName:     resolveDisplayName(profile.Alias, target),
+			MeaningfulDisks: meaningfulStorageDisks(activity.Disks),
 		})
 	}
 	model.applyFilter()
@@ -696,6 +805,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.hosts[i].Memory = msg.Activity.Memory
 			m.hosts[i].Disk = msg.Activity.Disk
 			m.hosts[i].Disks = append([]diskUsage(nil), msg.Activity.Disks...)
+			m.hosts[i].MeaningfulDisks = meaningfulStorageDisks(msg.Activity.Disks)
 			m.hosts[i].Tools = append([]string(nil), msg.Activity.Tools...)
 			m.hosts[i].Updated = msg.Activity.Updated
 			break
@@ -2208,6 +2318,7 @@ func (m *dashboardModel) recordActionUsage(action dashboardAction, command comma
 		m.actionUses = map[string]int{}
 	}
 	m.actionUses[key]++
+	m.actionUsageGen++
 	statePath := m.statePath
 	if statePath == "" {
 		return nil
@@ -2322,8 +2433,31 @@ func (m dashboardModel) displayNameForTarget(target string) string {
 	return target
 }
 
+// availableCommands returns the sorted action/saved-command list for the
+// currently selected host, served from m.commandsCache when possible.
+// Recomputing it means calling commandsForTarget, which merges global, tag,
+// and host-profile commands and calls profileForTarget -- a map iteration
+// plus sort.Strings over every configured host profile -- so this used to
+// run in full on every single frame from both actionRailView and (via
+// filteredCommands) the command palette. The cache is keyed on the selected
+// target and actionUsageGen, the only two things that change the result
+// during a running session; PinnedActions is only ever edited in the YAML
+// config on disk, never from inside the dashboard, so it needs no key entry.
 func (m dashboardModel) availableCommands() []dashboardCommand {
-	if m.selectedTarget() == "" {
+	target := m.selectedTarget()
+	if m.commandsCache != nil && m.commandsCache.valid &&
+		m.commandsCache.target == target && m.commandsCache.gen == m.actionUsageGen {
+		return m.commandsCache.commands
+	}
+	commands := m.computeAvailableCommands(target)
+	if m.commandsCache != nil {
+		*m.commandsCache = dashboardCommandsCache{valid: true, target: target, gen: m.actionUsageGen, commands: commands}
+	}
+	return commands
+}
+
+func (m dashboardModel) computeAvailableCommands(target string) []dashboardCommand {
+	if target == "" {
 		commands := []dashboardCommand{
 			{Label: "Settings", Description: "Themes, workspace, and config", Action: actionSettings},
 		}
@@ -2344,7 +2478,7 @@ func (m dashboardModel) availableCommands() []dashboardCommand {
 		{"Fleet", "Inspect saved hosts", actionFleet, commandConfig{}},
 		{"Settings", "Themes, workspace, and config", actionSettings, commandConfig{}},
 	}
-	for _, command := range commandsForTarget(m.selectedTarget()) {
+	for _, command := range commandsForTarget(target) {
 		commands = append(commands, dashboardCommand{
 			Label: command.Name, Description: command.Description, Action: actionCustom, Command: command,
 		})
@@ -2507,7 +2641,31 @@ func (m dashboardModel) finishView(view string) string {
 		for len(lines) < m.height {
 			lines = append(lines, "")
 		}
+		// lipgloss.PlaceHorizontal(width, Left, line, ...) is a no-op
+		// whenever the line's cell width is already >= width (its gap<=0
+		// early return), and it is a pure function of (width, line) --
+		// every empty filler line above produces the exact same padded
+		// blank, so we only need to compute that once. Panels in this UI
+		// are built to fill their column, so most non-blank lines already
+		// hit the no-op case too; skipping PlaceHorizontal's rune-by-rune
+		// whitespace rendering for those is the actual win.
+		var blankLine string
+		haveBlankLine := false
 		for index := range lines {
+			if terminalWidth(lines[index]) >= m.width {
+				continue
+			}
+			if lines[index] == "" {
+				if !haveBlankLine {
+					blankLine = lipgloss.PlaceHorizontal(
+						m.width, lipgloss.Left, "",
+						lipgloss.WithWhitespaceBackground(lipgloss.Color(m.theme.Background)),
+					)
+					haveBlankLine = true
+				}
+				lines[index] = blankLine
+				continue
+			}
 			lines[index] = lipgloss.PlaceHorizontal(
 				m.width,
 				lipgloss.Left,
@@ -2516,7 +2674,8 @@ func (m dashboardModel) finishView(view string) string {
 			)
 		}
 		rendered = strings.Join(lines, "\n")
-		rendered = paintTerminalSurface(rendered, m.theme.Text, m.theme.Background)
+		cache := m.paintCache()
+		rendered = paintTerminalSurface(rendered, cache.textForegroundPrefix, cache.screenBackgroundPrefix)
 	}
 	return rendered
 }
@@ -2526,24 +2685,18 @@ func (m dashboardModel) renderPanel(style lipgloss.Style, content string) string
 	if m.plain || m.theme.Surface == "" {
 		return rendered
 	}
-	return paintTerminalSurface(rendered, m.theme.Text, m.theme.Surface)
+	cache := m.paintCache()
+	return paintTerminalSurface(rendered, cache.textForegroundPrefix, cache.surfaceBackgroundPrefix)
 }
 
-func paintTerminalSurface(view, foreground, background string) string {
-	if view == "" || background == "" {
+// paintTerminalSurface fills in the background (and, where unset, the
+// foreground) of every printable cell in view that doesn't already carry its
+// own SGR color, using precomputed ANSI prefixes (see dashboardRenderCache
+// and terminalStylePrefix) rather than rebuilding a lipgloss.Style and
+// rendering a throwaway marker on every call.
+func paintTerminalSurface(view, foregroundPrefix, backgroundPrefix string) string {
+	if view == "" || backgroundPrefix == "" {
 		return view
-	}
-	backgroundPrefix := terminalStylePrefix(
-		lipgloss.NewStyle().Background(lipgloss.Color(background)),
-	)
-	if backgroundPrefix == "" {
-		return view
-	}
-	foregroundPrefix := ""
-	if foreground != "" {
-		foregroundPrefix = terminalStylePrefix(
-			lipgloss.NewStyle().Foreground(lipgloss.Color(foreground)),
-		)
 	}
 
 	var painted strings.Builder
@@ -3031,8 +3184,13 @@ func (m dashboardModel) telemetryView(s dashboardStyles, width, height int) stri
 			}
 		}
 	}
-	if len(host.Disks) > 0 && len(lines) < height-5 {
-		disks := meaningfulStorageDisks(host.Disks)
+	if len(host.MeaningfulDisks) > 0 && len(lines) < height-5 {
+		// Copy before sorting: host.MeaningfulDisks is a cached slice shared
+		// across frames and other panels (detailView, compactDetailView),
+		// which expect its original meaningfulStorageDisks order ("/" first,
+		// then usage desc). Sorting it in place here would corrupt that
+		// shared order for everyone else.
+		disks := append([]diskUsage(nil), host.MeaningfulDisks...)
 		sort.SliceStable(disks, func(left, right int) bool {
 			return diskPercent(disks[left]) > diskPercent(disks[right])
 		})
@@ -3345,8 +3503,7 @@ func (m dashboardModel) btopPanelView(
 			lines = append(lines, s.failure.Render(truncateText(m.btopStreamError, innerWidth)))
 		}
 		if entry.Current.BtopFrame != "" {
-			frame := fitTerminalView(entry.Current.BtopFrame, innerWidth, frameHeight)
-			lines = append(lines, strings.Split(frame, "\n")...)
+			lines = append(lines, m.btopFrameLines(entry.Current.BtopFrame, innerWidth, frameHeight)...)
 		} else {
 			message := "Opening a live remote terminal…"
 			switch m.btopStreamState {
@@ -3390,6 +3547,26 @@ func (m dashboardModel) btopPanelView(
 	}
 	return m.renderPanel(panel.Width(max(1, panelWidth)).Height(max(1, panelHeight)).Padding(0, 1),
 		strings.Join(lines, "\n"))
+}
+
+// btopFrameLines returns fitTerminalView(frame, width, height) split into
+// lines, served from m.btopFrameCache when the frame (identified by
+// btopStreamFrames, see dashboardBtopFrameCache) and viewport size match the
+// last computation.
+func (m dashboardModel) btopFrameLines(frame string, width, height int) []string {
+	if m.btopFrameCache != nil && m.btopFrameCache.valid &&
+		m.btopFrameCache.frames == m.btopStreamFrames &&
+		m.btopFrameCache.width == width && m.btopFrameCache.height == height {
+		return m.btopFrameCache.lines
+	}
+	fitted := fitTerminalView(frame, width, height)
+	lines := strings.Split(fitted, "\n")
+	if m.btopFrameCache != nil {
+		*m.btopFrameCache = dashboardBtopFrameCache{
+			valid: true, frames: m.btopStreamFrames, width: width, height: height, lines: lines,
+		}
+	}
+	return lines
 }
 
 func btopFrameViewport(width, height int, leftBorder, topBorder bool) (columns, rows int) {
@@ -3490,7 +3667,16 @@ type dashboardStyles struct {
 	panel, selected, selectedMuted, key                        lipgloss.Style
 }
 
+// styles returns the dashboardStyles bundle for the current theme/plain
+// setting, served from m.renderCache when possible. See dashboardRenderCache
+// for why caching through a pointer field is safe despite the value
+// receiver.
 func (m dashboardModel) styles() dashboardStyles {
+	cache := m.paintCache()
+	return cache.styles
+}
+
+func (m dashboardModel) computeStyles() dashboardStyles {
 	if m.plain {
 		return dashboardStyles{
 			title:         lipgloss.NewStyle().Bold(true),
@@ -3553,6 +3739,44 @@ func (m dashboardModel) styles() dashboardStyles {
 	}
 }
 
+// paintCache returns the memoized dashboardRenderCache for the current
+// plain/theme pair, recomputing (and, when m.renderCache is non-nil,
+// persisting) it on a cache miss. Every value that depends only on
+// plain+theme -- the dashboardStyles bundle and the raw ANSI prefixes
+// paintTerminalSurface needs -- lives here so it survives across the many
+// value-receiver View() calls made while the theme stays the same.
+func (m dashboardModel) paintCache() dashboardRenderCache {
+	if m.renderCache != nil && m.renderCache.valid &&
+		m.renderCache.plain == m.plain && m.renderCache.theme == m.theme {
+		return *m.renderCache
+	}
+	entry := dashboardRenderCache{valid: true, plain: m.plain, theme: m.theme}
+	entry.styles = m.computeStyles()
+	entry.footerHintsDefault = []string{
+		keyHint(entry.styles, "enter", "connect"), keyHint(entry.styles, "j/k", "move"),
+		keyHint(entry.styles, "/", "find"), keyHint(entry.styles, "a", "actions"), keyHint(entry.styles, "o", "activity"),
+	}
+	entry.footerHintsTabs = []string{
+		keyHint(entry.styles, "tab", "switch tab"), keyHint(entry.styles, "←/→", "navigate"),
+		keyHint(entry.styles, ",", "settings"), keyHint(entry.styles, "h", "keys"),
+	}
+	if !m.plain {
+		if m.theme.Text != "" {
+			entry.textForegroundPrefix = terminalStylePrefix(lipgloss.NewStyle().Foreground(lipgloss.Color(m.theme.Text)))
+		}
+		if m.theme.Surface != "" {
+			entry.surfaceBackgroundPrefix = terminalStylePrefix(lipgloss.NewStyle().Background(lipgloss.Color(m.theme.Surface)))
+		}
+		if m.theme.Background != "" {
+			entry.screenBackgroundPrefix = terminalStylePrefix(lipgloss.NewStyle().Background(lipgloss.Color(m.theme.Background)))
+		}
+	}
+	if m.renderCache != nil {
+		*m.renderCache = entry
+	}
+	return entry
+}
+
 func (m dashboardModel) headerView(s dashboardStyles) string {
 	online := 0
 	for _, host := range m.hosts {
@@ -3593,7 +3817,7 @@ func (m dashboardModel) workspaceTabs(s dashboardStyles) string {
 			tabs = append(tabs, s.key.Render(label))
 			continue
 		}
-		tabs = append(tabs, s.muted.Copy().Padding(0, 1).Render(label))
+		tabs = append(tabs, s.muted.Padding(0, 1).Render(label))
 	}
 	return strings.Join(tabs, " ")
 }
@@ -3806,7 +4030,7 @@ func (m dashboardModel) detailView(s dashboardStyles, width, height int) string 
 	lines = append(lines, s.text.Render("Memory   ")+s.muted.Render(valueOr(host.Memory, "unknown")), "")
 
 	lines = append(lines, s.focus.Render("STORAGE"))
-	disks := meaningfulStorageDisks(host.Disks)
+	disks := host.MeaningfulDisks
 	if len(disks) == 0 {
 		lines = append(lines, s.muted.Render(valueOr(host.Disk, "Not scanned · choose Storage in Actions")))
 	} else {
@@ -3861,7 +4085,7 @@ func (m dashboardModel) compactDetailView(s dashboardStyles, width, height int) 
 		}
 	}
 	storage := valueOr(host.Disk, "storage not scanned")
-	if disks := meaningfulStorageDisks(host.Disks); len(disks) > 0 {
+	if disks := host.MeaningfulDisks; len(disks) > 0 {
 		storage = fmt.Sprintf("%d storage volumes", len(disks))
 	}
 	lines := []string{
@@ -3886,15 +4110,10 @@ func (m dashboardModel) compactView(s dashboardStyles, width, height int) string
 }
 
 func (m dashboardModel) footerView(s dashboardStyles) string {
-	hintItems := []string{
-		keyHint(s, "enter", "connect"), keyHint(s, "j/k", "move"),
-		keyHint(s, "/", "find"), keyHint(s, "a", "actions"), keyHint(s, "o", "activity"),
-	}
+	cache := m.paintCache()
+	hintItems := cache.footerHintsDefault
 	if m.workspaceTabsVisible() {
-		hintItems = []string{
-			keyHint(s, "tab", "switch tab"), keyHint(s, "←/→", "navigate"),
-			keyHint(s, ",", "settings"), keyHint(s, "h", "keys"),
-		}
+		hintItems = cache.footerHintsTabs
 	}
 	hints := strings.Join(hintItems, "  ")
 	if m.width < 72 {
@@ -4732,7 +4951,11 @@ func fitTerminalView(view string, width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
-	lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+	trimmed := strings.TrimSuffix(view, "\n")
+	if terminalViewFits(trimmed, width, height) {
+		return trimmed
+	}
+	lines := strings.Split(trimmed, "\n")
 	if len(lines) > height {
 		lines = lines[:height]
 	}
@@ -4740,6 +4963,31 @@ func fitTerminalView(view string, width, height int) string {
 		lines[index] = ansi.Truncate(line, width, "")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// terminalViewFits reports whether fitTerminalView(value, width, height)
+// would return value unchanged: every line already at most width cells wide,
+// and at most height lines. It walks value once with no allocation, instead
+// of paying for the strings.Split slice, the per-line ansi.Truncate calls
+// (each of which starts by checking the exact same thing), and the
+// strings.Join the slow path needs -- all wasted work when the content
+// already fits, which panels in this UI are built to do most of the time.
+func terminalViewFits(value string, width, height int) bool {
+	lineCount := 1
+	start := 0
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\n' {
+			if terminalWidth(value[start:i]) > width {
+				return false
+			}
+			lineCount++
+			if lineCount > height {
+				return false
+			}
+			start = i + 1
+		}
+	}
+	return terminalWidth(value[start:]) <= width
 }
 
 func plainReachability(result reachabilityResult, probing bool) string {
@@ -4761,14 +5009,26 @@ func plainReachability(result reachabilityResult, probing bool) string {
 }
 
 func displayName(host dashboardHost) string {
-	if host.Alias != "" {
-		return host.Alias
+	// host.Alias and host.Target never change after a dashboardHost is
+	// constructed (see newDashboardModelWithState), so DisplayName -- set
+	// once there -- is always correct when present. Hosts built without it
+	// (only dashboardHost{} zero values today) fall back to computing it on
+	// the spot, matching the previous unconditional behavior.
+	if host.DisplayName != "" {
+		return host.DisplayName
 	}
-	spec, err := parseConnectionTarget(host.Target)
+	return resolveDisplayName(host.Alias, host.Target)
+}
+
+func resolveDisplayName(alias, target string) string {
+	if alias != "" {
+		return alias
+	}
+	spec, err := parseConnectionTarget(target)
 	if err == nil {
 		return spec.Host
 	}
-	return host.Target
+	return target
 }
 
 func relativeTime(value, now time.Time) string {
@@ -4802,29 +5062,130 @@ func valueOr(value, fallback string) string {
 
 func padCell(value string, width int) string {
 	value = truncateText(value, width)
-	return value + strings.Repeat(" ", max(0, width-lipgloss.Width(value)))
+	return value + strings.Repeat(" ", max(0, width-terminalWidth(value)))
 }
 
+// truncateText sanitizes value (stripping control/escape bytes and
+// collapsing whitespace, same as sanitizeTerminalText) and truncates it to
+// at most width terminal cells, appending an ellipsis when it had to cut.
+//
+// The general (non-ASCII) branch below deliberately does not call
+// ansi.Truncate: that function starts by computing ansi.StringWidth(s) to
+// decide whether to truncate at all, which we have already just done one
+// line above it (terminalGraphemeCut's total). Calling it anyway would
+// re-walk every grapheme cluster in value a second time; instead
+// terminalGraphemeCut finds the cut point in the same pass that computes
+// the width, matching ansi.Truncate's output exactly (verified by
+// TestTruncateTextMatchesReference) for one pass instead of two-plus.
 func truncateText(value string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	value = sanitizeTerminalText(value)
-	if lipgloss.Width(value) <= width {
+	if needsTerminalSanitize(value) {
+		value = sanitizeTerminalText(value)
+	}
+	if w, ok := asciiPrintableWidth(value); ok {
+		if w <= width {
+			return value
+		}
+		if width == 1 {
+			return "…"
+		}
+		return value[:width-1] + "…"
+	}
+	total, cutOffset, hasCut := terminalGraphemeCut(value, width-1)
+	if total <= width {
 		return value
 	}
 	if width == 1 {
 		return "…"
 	}
-	var b strings.Builder
-	for _, r := range value {
-		candidate := b.String() + string(r)
-		if lipgloss.Width(candidate) > width-1 {
+	if !hasCut {
+		// Defensive only: total > width > width-1 always yields a cut in
+		// terminalGraphemeCut, so this branch should be unreachable.
+		return value + "…"
+	}
+	return value[:cutOffset] + "…"
+}
+
+// terminalGraphemeCut walks value's grapheme clusters -- value must already
+// be free of ANSI escapes and control bytes, which is guaranteed by the
+// needsTerminalSanitize/sanitizeTerminalText step above -- and returns its
+// total cell width plus, if some prefix exceeds limit cells, the byte
+// offset of the first cluster whose addition pushes the running width past
+// limit (mirroring the cut point github.com/charmbracelet/x/ansi.Truncate
+// computes internally).
+func terminalGraphemeCut(value string, limit int) (total, cutOffset int, hasCut bool) {
+	offset := 0
+	for offset < len(value) {
+		cluster, w := ansi.FirstGraphemeCluster(value[offset:], ansi.GraphemeWidth)
+		if len(cluster) == 0 {
 			break
 		}
-		b.WriteRune(r)
+		if !hasCut && total+w > limit {
+			cutOffset = offset
+			hasCut = true
+		}
+		total += w
+		offset += len(cluster)
 	}
-	return b.String() + "…"
+	return total, cutOffset, hasCut
+}
+
+// needsTerminalSanitize reports whether sanitizeTerminalText(value) would
+// change value, so truncateText can skip it (and the strings.Builder +
+// strings.Fields/Join allocations it does unconditionally) on the very
+// common case of already-clean, single-spaced plain text. It must mirror
+// sanitizeTerminalText exactly: any control/escape byte forces the slow
+// path, and so does any leading/trailing whitespace or run of two or more
+// whitespace runes (strings.Fields collapses those). A rune that is
+// unicode-whitespace but not a plain ' ' is rare enough in practice (no
+// hostnames, labels, or command names in this app use one) that we simply
+// fall back to the real sanitizer for it rather than modeling it here.
+func needsTerminalSanitize(value string) bool {
+	if value == "" {
+		return false
+	}
+	prevSpace := true // start-of-string counts as "just saw a space" to catch leading whitespace
+	for _, r := range value {
+		if r == '\n' || r == '\r' || r == '\t' || r == 0x1b || r < 0x20 || r == 0x7f {
+			return true
+		}
+		if r == ' ' {
+			if prevSpace {
+				return true
+			}
+			prevSpace = true
+			continue
+		}
+		if unicode.IsSpace(r) {
+			return true
+		}
+		prevSpace = false
+	}
+	return prevSpace // trailing whitespace
+}
+
+// terminalWidth returns the terminal cell width of value, identical to
+// ansi.StringWidth/lipgloss.Width. Pure printable ASCII -- the overwhelming
+// majority of strings this package measures (hostnames, labels, numbers) --
+// is fast-pathed to its byte length, skipping ansi.StringWidth's
+// grapheme-cluster iteration (the single hottest call in this package's CPU
+// profile) entirely.
+func terminalWidth(value string) int {
+	if width, ok := asciiPrintableWidth(value); ok {
+		return width
+	}
+	return ansi.StringWidth(value)
+}
+
+func asciiPrintableWidth(value string) (int, bool) {
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return 0, false
+		}
+	}
+	return len(value), true
 }
 
 func isInteractiveTerminal() bool {
