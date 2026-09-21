@@ -37,15 +37,17 @@ var (
 )
 
 type app struct {
-	configDir    string
-	configFile   string
-	hostsFile    string
-	stateFile    string
-	dryRun       bool
-	verbose      bool
-	sshPort      int
-	remoteIndex  string
-	bootstrapped bool
+	configDir        string
+	configFile       string
+	hostsFile        string
+	stateFile        string
+	dryRun           bool
+	verbose          bool
+	sshPort          int
+	remoteIndex      string
+	bootstrapped     bool
+	configLoadedAt   time.Time
+	configLoadedSize int64
 }
 
 func newApp() (*app, error) {
@@ -153,8 +155,13 @@ func (a *app) ensureBootstrap() error {
 		return errors.New("internal error: app is nil")
 	}
 
+	// Bootstrap once per process, but reload when config.yaml changed on
+	// disk (a fresh process, an editor, or the e2e harness reusing one app).
 	if a.bootstrapped {
-		return nil
+		if info, err := os.Stat(a.configFile); err == nil &&
+			info.ModTime().Equal(a.configLoadedAt) && info.Size() == a.configLoadedSize {
+			return nil
+		}
 	}
 
 	if err := os.MkdirAll(a.configDir, 0o700); err != nil {
@@ -201,6 +208,10 @@ func (a *app) ensureBootstrap() error {
 	fzfUIConfig = cfgFZF
 
 	a.bootstrapped = true
+	if info, err := os.Stat(a.configFile); err == nil {
+		a.configLoadedAt = info.ModTime()
+		a.configLoadedSize = info.Size()
+	}
 	return nil
 }
 
