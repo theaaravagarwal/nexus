@@ -19,7 +19,7 @@ func renderBtopFrame(raw string, columns, rows int) string {
 	columns = min(180, max(btopMinColumns, columns))
 	rows = min(60, max(btopMinRows, rows))
 	emulator := vt.NewEmulator(columns, rows)
-	defer emulator.Close()
+	defer func() { _ = emulator.Close() }()
 	emulator.SetScrollbackSize(0)
 
 	// btop wraps each repaint in synchronized-output markers. Preserve the

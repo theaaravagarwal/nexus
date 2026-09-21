@@ -67,10 +67,6 @@ func TestFleetTelemetryPoolSyncCancelAfterGracePeriod(t *testing.T) {
 		{Target: "host1", Interval: 5 * time.Second},
 	})
 
-	pool.mu.Lock()
-	_, _ = pool.sessions["host1"]
-	pool.mu.Unlock()
-
 	// Remove from desired list to move to idle
 	pool.sync([]fleetTelemetrySpec{})
 

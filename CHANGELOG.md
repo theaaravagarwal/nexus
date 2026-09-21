@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-21
+
 ### Fixed
 
 - Monitor live btop pane no longer stays on "connecting" when the remote btop configuration needs more rows than the pane. The stream now reads btop's required size and retries with a smaller `shown_boxes` layout via a temporary `XDG_CONFIG_HOME` config that preserves the user's settings and theme.

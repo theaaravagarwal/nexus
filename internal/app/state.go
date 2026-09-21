@@ -189,10 +189,6 @@ func updateState(path string, mutate func(*nexusState)) error {
 	return saveState(path, state)
 }
 
-func acquireStateLock(path string) (func(), error) {
-	return acquireFileLock(path)
-}
-
 func acquireFileLock(path string) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err

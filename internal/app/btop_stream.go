@@ -15,7 +15,6 @@ import (
 	"time"
 	"unicode/utf16"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 )
@@ -192,16 +191,6 @@ watcher=$!
 wait "$pid"
 kill "$watcher" 2>/dev/null
 `, btopUnavailableMarker, btopFrameMarker, columns, rows, setup, launch)
-}
-
-func waitForBtopStream(events <-chan btopStreamEventMsg) tea.Cmd {
-	return func() tea.Msg {
-		message, ok := <-events
-		if !ok {
-			return btopStreamEventMsg{Done: true}
-		}
-		return message
-	}
 }
 
 func publishBtopStreamEvent(
@@ -454,7 +443,7 @@ func runBtopStreamAttempt(
 	})
 
 	emulator := vt.NewEmulator(columns, rows)
-	defer emulator.Close()
+	defer func() { _ = emulator.Close() }()
 	emulator.SetScrollbackSize(0)
 
 	stop := make(chan struct{})

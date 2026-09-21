@@ -343,7 +343,7 @@ func streamRemoteFleetTelemetry(
 	if runErr != nil {
 		return errors.New(friendlyBtopStreamError(stderr.String(), runErr))
 	}
-	return errors.New("Fleet telemetry stream ended")
+	return errors.New("fleet telemetry stream ended")
 }
 
 func parseFleetTelemetryLine(line, target string, collectedAt time.Time) (telemetrySample, error) {

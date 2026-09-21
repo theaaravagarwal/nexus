@@ -510,10 +510,8 @@ func TestCommandsForTargetPreservesConfirmFlag(t *testing.T) {
 
 	if deployCmd == nil {
 		t.Fatal("deploy command not found in merged commands")
-	}
-
-	// Confirm should be true (preserved from global, even though override is false)
-	if !deployCmd.Confirm {
+	} else if !deployCmd.Confirm {
+		// Confirm must survive the override (global true, per-host false).
 		t.Errorf("Confirm flag not preserved: got %v, want true", deployCmd.Confirm)
 	}
 }

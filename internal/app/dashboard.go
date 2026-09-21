@@ -3994,9 +3994,10 @@ func (m dashboardModel) hostListView(s dashboardStyles, width, height int) strin
 		)
 	} else {
 		rowHeight := 2
-		if m.density == "compact" {
+		switch m.density {
+		case "compact":
 			rowHeight = 1
-		} else if m.density == "comfortable" {
+		case "comfortable":
 			rowHeight = 3
 		}
 		rows := max(1, (height-6)/rowHeight)
