@@ -39,7 +39,7 @@ The `app` struct holds four file paths:
 1. Calls `a.validateGlobalOptions(cmd)` to check flag constraints
 2. Calls `a.ensureBootstrap()` **unless** `cmd.Annotations["skip-bootstrap"] == "true"`
 
-`ensureBootstrap()` creates the config directory, seeds `hosts.json` if missing (via `probes.go`), calls `ensureConfigFile` to initialize YAML, then `loadConfigFromYAML` which populates package globals:
+`ensureBootstrap()` runs **once per process** but reloads when `config.yaml` changes (via mtime/size comparison). It creates the config directory with mode 0700, seeds `hosts.json` if missing (via `probes.go`), calls `ensureConfigFile` to initialize YAML, then `loadConfigFromYAML` which populates package globals. Config file ownership is checked via `checkFileOwnership` (build-tagged in `proc_unix.go`/`proc_windows.go`):
 
 - `loadedConfig` (type `appConfig`; config.go)
 - `fzfUIConfig` (type `fzfConfig`; fzf_style.go)
@@ -83,13 +83,13 @@ UI value edits (monitorBtopEnabled, workspace, etc.) are **surgical**: `saveUIVa
 SSH argv is built by `buildSSHArgsForTraffic(host, interactive, remoteCmd, profile)` where profile is:
 
 - `sshTrafficDefault`: NonInteractive BatchMode, publickey-only, StrictHostKeyChecking=yes, short timeouts
-- `sshTrafficMonitoring`: Like Default but with ssh-agent fallback, for telemetry streams
+- `sshTrafficMonitoring`: telemetry, fleet, and btop streams. Adds `BatchMode=yes`, `PreferredAuthentications=publickey`, `StrictHostKeyChecking=yes`, `ConnectTimeout=3`, one attempt. Never prompts; unknown hosts or password-only hosts fail fast with an explained error.
 
-Both profiles get `sshMultiplexArgs()` appended (performance.go): ControlMaster=auto, ControlPersist=600, ControlPath under user cache dir.
+Both profiles get `sshMultiplexArgs()` appended (performance.go): ControlMaster=auto, ControlPersist=600, ControlPath under user cache dir. The `-q` flag (quiet mode) is **not** applied to PTY-backed monitoring streams, so ssh diagnostics (e.g., "Permission denied") reach stderr for friendly error handling. SSH Compression is enabled only for interactive PTY streams (btop monitor).
 
-**Critical:** Remote scripts MUST be wrapped with `remoteShellCommand("sh", script)` (diagnostics.go) which produces `sh -c '<shellQuote(script)>'`. The `shellQuote` function (main.go) escapes for sh safety.
+**Critical:** Remote scripts MUST be wrapped with `remoteShellCommand("sh", script)` which produces `sh -c '<shellQuote(script)>'`. The `shellQuote` function escapes for sh safety.
 
-Rsync: `buildRsyncArgs` and `buildRsyncSSHCommand` construct `-e ssh -p <port>` options. SSH args are never built as a shell string; always as argv.
+Rsync: `buildRsyncArgs` and `buildRsyncSSHCommand` construct `-e ssh -p <port>` options. The `--protect-args` flag is gated by `rsyncSupportsProtectArgs` (performance.go). Hosts.json mutations are guarded by `acquireFileLock` (state.go).
 
 ## TUI
 
@@ -108,9 +108,11 @@ Rsync: `buildRsyncArgs` and `buildRsyncSSHCommand` construct `-e ssh -p <port>` 
 3. Pane renderers: `hostListView`, `detailView`, `telemetryView`, `activityView`, `actionRailView`, `btopPanelView`
 4. `renderPanel` → `paintTerminalSurface` (lipgloss + ANSI recolor) → `finishView`
 
-**Workspaces:** `workspaceModes()` returns [workbench, console, fleet]. Tabs are visible if `experimentalTabs && width>=150 && height>=28` (per `workspaceTabsVisible()`). `ultraWideView` dispatches to `workbenchWorkspaceView`, `consoleWorkspaceView`, or `fleetWorkspaceView`.
+**Caching & pointer safety:** Render caches (`dashboardRenderCache`, `renderCache`, `commandsCache`, `btopFrameCache`) and host fields (`DisplayName`, `MeaningfulDisks`) are pointer-typed. Bubble Tea's single-goroutine event loop guarantees cache mutations are safe: the same pointer is forwarded through View/Update calls without external mutation. Render-parity test (`render_parity_test.go`, testdata in `testdata/render`) runs with `-update` flag to regenerate golden files. Differential test `truncate_text_test.go` validates text truncation.
 
-Styles come from `styles()` (computed per frame) and `theme.go` (color scheme). Overlays and pause state: `telemetryPaused()` checks telemetry focus + operation state.
+**Workspaces & btop gate:** `workspaceModes()` returns [workbench, console, fleet]. Tabs are visible if `experimentalTabs && width>=150 && height>=28`. `monitorBtopViewport` requires console workspace, `width >= minBtopTerminalWidth(density)`, `height >= minBtopTerminalHeight(activityOpen)` (where btop needs ≥80×24 viewport). `btopGateReason` explains gate failures. Btop stream is kept alive for `btopStreamPauseGrace` (30s) after user focus leaves monitor pane; `btopStreamRetryAt` guards retry attempts.
+
+Styles come from `styles()` (memoized in `renderCache`, recomputed only when the theme or plain mode changes) and `theme.go` (color scheme).
 
 ## Live Data Pipelines
 
@@ -118,27 +120,29 @@ Three independent subscription-driven data streams:
 
 1. **Single-host telemetry** (telemetry.go): On `telemetryTickMsg`, runs `telemetryCommand` (fetch metrics from chosen host). Backoff via `telemetryBackoff(failures, generation)`. The Cmd must be re-returned after every message.
 
-2. **Fleet telemetry** (fleet_telemetry.go): `fleetTelemetryPool` maintains up to `fleetTelemetryMaxStreams` (12) persistent SSH streams, each running a remote metrics loop. Batched via `waitForFleetTelemetry`. Rotation via `fleetTelemetryRotateTick` (cycles active streams).
+2. **Fleet telemetry** (fleet_telemetry.go): `fleetTelemetryPool` maintains up to `fleetTelemetryMaxStreams` (12) concurrent persistent SSH streams. Rotation every 30 seconds via `fleetTelemetryRotateInterval`. Idle sessions get `fleetTelemetryGracePeriod` (30s) before cleanup. Synced by `fleetTelemetryPool.sync(specs)` which manages desired active sessions.
 
-3. **Btop stream** (btop_pool.go, btop_stream.go): Single PTY `ssh -tt` session running `btopStreamCommand`. Output replayed into `vt.NewEmulator`, frames scored by `btopFrameScore`, published as `btopStreamEventMsg`. UI gate: `ensureBtopStream`, `monitorBtopViewport` (requires console workspace, width>=120, height>=20, viewport >= 80x24 = `btopMinColumns`x`btopMinRows`). Published via `waitForBtopStreamPool`.
+3. **Btop stream** (btop_pool.go, btop_stream.go): Single PTY `ssh -tt` session running `btopStreamCommand(columns, rows, boxes)`. The **layout-fitting ladder** handles "Terminal size too small" errors from btop: `streamRemoteBtopFrom` walks `btopBoxLadder` (ordered richest-first box configurations) and `btopFallbackLadder` (fallback shown_boxes values), calling `runBtopStreamAttempt` for each attempt. The layout ladder is remembered per target in `lastBoxes` (btop_pool.go). Stream events carry `Stage` ("fitting"/"connecting"/"live") and `Status` (descriptive message). Time-based frame emission and watchdog checks run at `btopStreamTickInterval` (50ms). Output is replayed into `vt.NewEmulator`, frames scored by `btopFrameScore`, published as `btopStreamEventMsg`. UI gate checks `btopGateReason`, which validates workspace, dimensions, and viewport size (≥80×24 = `btopMinColumns`×`btopMinRows`). Btop stream is kept alive for `btopStreamPauseGrace` (30s) after leaving monitor pane.
 
 **Subscription pattern:** Each `Cmd` returned by a `waitFor*` function must be re-returned after every Update; the wait loop only fires once and must be subscribed again.
 
-## Probes, Metadata, Diagnostics
+## Discovery & Diagnostics
 
-- **probes.go**: TCP reachability checks (`Reachability.Concurrency` limit), host bootstrap discovery
-- **metadata.go**: Remote script (`metadataScript` const) extracts CPU, memory, storage; results parsed into snapshots. `meaningfulStorageDisks` filters storage list.
-- **diagnostics.go**: `runScript` with shell fallback (sh/bash/zsh), uses `remoteShellCommand` wrapper. `probeScript` (buildRemoteProbeScript) constructs a multi-command shell script.
+- **probes.go**: TCP reachability checks (`Reachability.Concurrency` limit), host bootstrap discovery via `probes` command
+- **metadata.go**: Remote script (`metadataScript` const) extracts CPU, memory, storage; results parsed into snapshots. `meaningfulStorageDisks` filters storage list by mount patterns.
+- **diagnostics.go**: `runScript` with shell fallback (sh/bash/zsh), uses `remoteShellCommand("sh", …)` wrapper. `probeScript` constructs multi-command shell scripts.
+- **Path discovery (main.go)**: `getGlobalIgnoreRegex` (single-escaped, anchored) plus `.gitignore` patterns filter remote `find` output in `buildUnixDiscoveryCommand`; transfers run through `buildRsyncArgs`, which adds `--protect-args` when `rsyncSupportsProtectArgs` says the binary is real rsync 3+. Hosts.json mutations are guarded by `acquireFileLock`.
 
 ## Testing
 
-Tests are hermetic. `e2e_test.go` and `cli_matrix_test.go` create fake binaries (ssh, rsync, fzf, editor as `#!/bin/sh` scripts) in `t.TempDir()` and prepend to PATH. Network tests in `telemetry_test.go` skip unless `NEXUS_TEST_SSH_HOST` is set. `dashboard_test.go` drives `Update`/`View` directly with fixed dimensions (no PTY needed).
+Tests are hermetic. `e2e_test.go` and `cli_matrix_test.go` create fake binaries (ssh, rsync, fzf, editor as `#!/bin/sh` scripts) in `t.TempDir()` and prepend to PATH. Network tests skip unless `NEXUS_TEST_SSH_HOST` is set. `dashboard_test.go` drives `Update`/`View` directly with fixed dimensions (no PTY). Render-parity test (`render_parity_test.go`) compares against golden files in `testdata/render/`; run with `-update` flag to regenerate. Differential test `truncate_text_test.go` validates text truncation behavior. CPU profiling via `NEXUS_CPUPROFILE=path` env var in `Execute` profiles TUI runtime.
 
 ## Build, CI, Release
 
-- **ci.yml** (.github/workflows): Run linters, tests, coverage
-- **.golangci.yml**: Linter configuration
-- **.goreleaser.yaml**: Binary naming, asset structure
+- **Makefile**: `build`, `test`, `vet`, `lint`, `bench`, `check` targets (all in one command: `make check`)
+- **ci.yml** (.github/workflows): Lint, vet, race-check, test per PR/main push
+- **.golangci.yml**: Linter configuration (enabled checks and exclusions)
+- **.goreleaser.yaml**: Binary naming, asset structure, release automation
 - **install.sh**: Download and verify release binaries per OS/arch
 
-Run `go build ./... && go vet ./... && go test -race ./...` before finishing. A `make check` target is being added in parallel; prefer it once available.
+Profiling: `NEXUS_CPUPROFILE=path` writes a CPU profile to `path` for analyzing TUI startup/rendering. Testing headlessly: `NEXUS_TEST_SSH_HOST=host` enables network tests. Driving TUI with tmux: `tmux new-session -x 180 -y 45 'nexus' ; tmux send-keys Tab ; tmux capture-pane -p` creates a headless session and captures rendered output.
