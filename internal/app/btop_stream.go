@@ -152,7 +152,12 @@ func clampBtopViewport(columns, rows int) (int, int) {
 // remoteShellCommand so it runs safely under the login shell.
 func btopStreamCommand(columns, rows int, boxes string) string {
 	columns, rows = clampBtopViewport(columns, rows)
-	launch := "btop"
+	// btop 1.4+ can decide on its own to use tty mode (16 colours, block
+	// graphs, square corners) inside the Monitor's pty; --no-tty forces the
+	// normal renderer. Older releases reject unknown flags, so the flag is
+	// only passed when --help advertises it. The user's config is otherwise
+	// used as is.
+	launch := "btop $btop_flags"
 	setup := ""
 	if boxes != "" {
 		setup = fmt.Sprintf(`conf="${XDG_CONFIG_HOME:-$HOME/.config}/btop"
@@ -167,7 +172,7 @@ if [ -d "$conf/themes" ]; then
 fi
 printf 'shown_boxes = "%s"\nupdate_ms = 1000\n' >> "$tmp/btop/btop.conf"
 `, boxes)
-		launch = `XDG_CONFIG_HOME="$tmp" btop`
+		launch = `XDG_CONFIG_HOME="$tmp" btop $btop_flags`
 	}
 	return fmt.Sprintf(`
 if ! command -v btop >/dev/null 2>&1; then
@@ -177,6 +182,8 @@ fi
 printf '%s\n'
 export TERM=xterm-256color
 stty cols %d rows %d 2>/dev/null || true
+btop_flags=
+if btop --help 2>&1 | grep -q -- '--no-tty'; then btop_flags=--no-tty; fi
 # Background jobs of a non-interactive shell get stdin from /dev/null, so
 # hand btop (and the watcher below) the controlling terminal explicitly.
 %s%s </dev/tty &

@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-21
+
+### Fixed
+
+- btop 1.4+ could switch itself into tty mode (block graphs, square corners, 16 colours) inside the Monitor pane, seen on a WSL host; the wrapper now passes `--no-tty` whenever the installed btop advertises the flag. Linux and macOS hosts otherwise keep their own btop configuration; the Windows config override is unchanged.
+
 ## [0.2.0] - 2026-09-21
 
 ### Fixed

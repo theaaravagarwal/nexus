@@ -230,7 +230,8 @@ func TestBtopStreamCommandUsesRequestedViewportWithoutForcingAFloor(t *testing.T
 	script := btopStreamCommand(72, 12, "")
 	for _, want := range []string{
 		btopUnavailableMarker, btopFrameMarker, "command -v btop", "stty cols 72 rows 12",
-		"btop </dev/tty &", "trap 'stop; exit 0' HUP INT TERM", "while stty size", `wait "$pid"`,
+		"btop $btop_flags </dev/tty &", "trap 'stop; exit 0' HUP INT TERM", "while stty size", `wait "$pid"`,
+		"btop --help 2>&1 | grep -q -- '--no-tty'", "btop_flags=--no-tty",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("btop capture script missing %q:\n%s", want, script)
@@ -249,7 +250,7 @@ func TestBtopStreamCommandWithBoxesBuildsTemporaryFittedConfig(t *testing.T) {
 			t.Fatalf("fitted btop script missing %q:\n%s", want, script)
 		}
 	}
-	if strings.Contains(script, "exec btop") || !strings.Contains(script, `XDG_CONFIG_HOME="$tmp" btop </dev/tty &`) {
+	if strings.Contains(script, "exec btop") || !strings.Contains(script, `XDG_CONFIG_HOME="$tmp" btop $btop_flags </dev/tty &`) {
 		t.Fatal("fitted btop script must background btop under the temp config so it can be stopped and cleaned up")
 	}
 }
