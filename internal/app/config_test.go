@@ -479,6 +479,8 @@ func TestCommandsRejectTerminalControlCharacters(t *testing.T) {
 }
 
 func TestCommandsForTargetPreservesConfirmFlag(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
 	// Set up a configuration with a global confirm command and a host profile override
 	loadedConfig = appConfig{
 		Commands: []commandConfig{

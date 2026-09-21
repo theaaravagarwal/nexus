@@ -12,10 +12,11 @@ import (
 )
 
 var (
-	controlPathOnce sync.Once
-	controlPath     string
-	rsyncVersionRE  = regexp.MustCompile(`(?i)version\s+(\d+)\.(\d+)(?:\.(\d+))?`)
-	rsyncSkipCache  sync.Map
+	controlPathOnce   sync.Once
+	controlPath       string
+	rsyncVersionRE    = regexp.MustCompile(`(?i)version\s+(\d+)\.(\d+)(?:\.(\d+))?`)
+	rsyncSkipCache    sync.Map
+	rsyncProtectCache sync.Map
 )
 
 func sshMultiplexArgs() []string {
@@ -98,6 +99,32 @@ func rsyncVersionSupportsSkipCompress(output string) bool {
 	major, _ := strconv.Atoi(match[1])
 	minor, _ := strconv.Atoi(match[2])
 	return major > 3 || major == 3 && minor >= 1
+}
+
+func rsyncSupportsProtectArgs(binary string) bool {
+	if cached, ok := rsyncProtectCache.Load(binary); ok {
+		return cached.(bool)
+	}
+	cmd := exec.Command(binary, "--version")
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	supported := cmd.Run() == nil && rsyncVersionSupportsProtectArgs(output.String())
+	rsyncProtectCache.Store(binary, supported)
+	return supported
+}
+
+// rsyncVersionSupportsProtectArgs reports whether --protect-args (-s) is
+// accepted: real rsync 3.0+, never openrsync.
+func rsyncVersionSupportsProtectArgs(output string) bool {
+	if strings.Contains(strings.ToLower(output), "openrsync") {
+		return false
+	}
+	match := rsyncVersionRE.FindStringSubmatch(output)
+	if len(match) < 3 {
+		return false
+	}
+	major, _ := strconv.Atoi(match[1])
+	return major >= 3
 }
 
 func appendSkipCompress(args []string, binary string) []string {

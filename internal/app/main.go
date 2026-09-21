@@ -1853,7 +1853,11 @@ func buildRsyncArgs(rsyncBin, source, destination string, opts rsyncOptions) []s
 		// Consider ControlMaster/ControlPersist in ~/.ssh/config to reuse one connection.
 		"-e", buildRsyncSSHCommand(opts.sshPort),
 		"--blocking-io",
-		"--protect-args",
+	}
+	// Protect remote paths (spaces, globs, backticks) from the remote shell.
+	// openrsync (the default rsync on macOS 15+) does not support the flag.
+	if rsyncSupportsProtectArgs(rsyncBin) {
+		args = append(args, "--protect-args")
 	}
 	if opts.forceRemoteRsyncPath {
 		args = append(args, "--rsync-path=rsync")

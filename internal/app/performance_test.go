@@ -33,3 +33,18 @@ func TestEnsurePrivateDirectoryRejectsPermissiveExistingDirectory(t *testing.T) 
 		t.Fatal("expected permissive existing directory to be rejected")
 	}
 }
+
+func TestRsyncVersionSupportsProtectArgs(t *testing.T) {
+	cases := map[string]bool{
+		"rsync  version 3.4.1  protocol version 32":                      true,
+		"rsync  version 3.0.9  protocol version 30":                      true,
+		"rsync  version 2.6.9  protocol version 29":                      false,
+		"openrsync: protocol version 29\nrsync version 2.6.9 compatible": false,
+		"": false,
+	}
+	for output, want := range cases {
+		if got := rsyncVersionSupportsProtectArgs(output); got != want {
+			t.Errorf("rsyncVersionSupportsProtectArgs(%q)=%v want %v", output, got, want)
+		}
+	}
+}

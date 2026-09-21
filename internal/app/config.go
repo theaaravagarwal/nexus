@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -113,12 +112,8 @@ func ensureConfigFile(configPath string) error {
 				return fmt.Errorf("failed to protect config file: %w", err)
 			}
 		}
-		// On Unix, verify the file is owned by the current uid
-		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-			// os.Getuid() is only available on Unix; the type assertion already guards us
-			if int(stat.Uid) != os.Getuid() {
-				return fmt.Errorf("config file is not owned by current user: %s", configPath)
-			}
+		if err := checkFileOwnership(configPath, info); err != nil {
+			return err
 		}
 		return ensureSavedCommandExamples(configPath)
 	}

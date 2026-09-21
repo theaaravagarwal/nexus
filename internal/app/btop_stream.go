@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -391,7 +390,7 @@ func runBtopStreamAttempt(
 	var stderr btopStderrCapture
 	// Run the remote shell in its own process group so a hard kill can
 	// take the whole tree with it, not just the top ssh/shell process.
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(command)
 	if err := command.Start(); err != nil {
 		publishBtopStreamEvent(ctx, events, btopStreamEventMsg{
 			Generation: generation, Target: target, Done: true,
@@ -493,14 +492,7 @@ func runBtopStreamAttempt(
 	}
 
 	killAndWait := func() {
-		if command.Process != nil {
-			// Kill the whole process group (see the SysProcAttr comment
-			// above), falling back to just the direct child if the group
-			// kill is refused for some reason.
-			if killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); killErr != nil {
-				_ = command.Process.Kill()
-			}
-		}
+		killProcessTree(command)
 		_ = command.Wait()
 	}
 

@@ -135,8 +135,11 @@ func TestEnsureWindowsRemotePath(t *testing.T) {
 }
 
 func TestBuildRsyncArgsIncludesProtectArgs(t *testing.T) {
+	// Seed the capability cache so the test does not depend on the local rsync.
+	rsyncProtectCache.Store("rsync-test-bin", true)
+	t.Cleanup(func() { rsyncProtectCache.Delete("rsync-test-bin") })
 	opts := rsyncOptions{sshPort: 22, dryRun: false, forceRemoteRsyncPath: false, stabilityProfile: false}
-	args := buildRsyncArgs("rsync", "/local/src", "user@host:/remote/dst", opts)
+	args := buildRsyncArgs("rsync-test-bin", "/local/src", "user@host:/remote/dst", opts)
 
 	hasProtectArgs := false
 	for _, arg := range args {
