@@ -388,9 +388,6 @@ func runBtopStreamAttempt(
 		return false, 0, 0
 	}
 	var stderr btopStderrCapture
-	// Run the remote shell in its own process group so a hard kill can
-	// take the whole tree with it, not just the top ssh/shell process.
-	setProcessGroup(command)
 	if err := command.Start(); err != nil {
 		publishBtopStreamEvent(ctx, events, btopStreamEventMsg{
 			Generation: generation, Target: target, Done: true,
@@ -492,7 +489,12 @@ func runBtopStreamAttempt(
 	}
 
 	killAndWait := func() {
-		killProcessTree(command)
+		// Kill only the ssh client. Never kill its process group: the
+		// ControlMaster mux master forked by ssh shares the group and
+		// must outlive us so later connections reuse the session.
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
 		_ = command.Wait()
 	}
 

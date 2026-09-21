@@ -2,17 +2,6 @@
 
 package app
 
-import (
-	"os"
-	"os/exec"
-)
-
-func setProcessGroup(*exec.Cmd) {}
-
-func killProcessTree(command *exec.Cmd) {
-	if command.Process != nil {
-		_ = command.Process.Kill()
-	}
-}
+import "os"
 
 func checkFileOwnership(string, os.FileInfo) error { return nil }
