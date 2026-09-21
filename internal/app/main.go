@@ -1637,7 +1637,13 @@ func buildSSHArgsForTraffic(
 		"-o", "VisualHostKey=no",
 		"-o", "ServerAliveInterval=" + serverAliveInterval,
 		"-o", "ServerAliveCountMax=" + serverAliveCount,
-		"-q",
+	}
+	// The PTY-backed monitoring stream (the btop Monitor pane) needs ssh's
+	// own diagnostics, such as "Permission denied (publickey)", to reach
+	// stderr so friendlyBtopStreamError can explain the failure; -q would
+	// silence them along with everything else. Every other caller keeps -q.
+	if traffic != sshTrafficMonitoring || !interactive {
+		args = append(args, "-q")
 	}
 	if traffic == sshTrafficMonitoring {
 		args = append(args,

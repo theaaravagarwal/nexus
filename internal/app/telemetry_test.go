@@ -97,18 +97,28 @@ func TestBtopStreamPoolReusesSelectedRemoteHostWhenHostIsProvided(t *testing.T) 
 		t.Fatal("first visit did not start a btop stream")
 	}
 	var first btopStreamEventMsg
-	select {
-	case first = <-pool.updates:
-		if first.Frame == "" || first.Error != "" {
-			t.Fatalf("first Monitor frame failed: %#v", first)
+	deadline := time.After(8 * time.Second)
+	for first.Frame == "" {
+		select {
+		case event := <-pool.updates:
+			// Progress-only events (e.g. Stage "connecting"/"fitting" while
+			// the layout-fitting ladder finds a shown_boxes set that fits
+			// this viewport) carry no frame yet; keep waiting for the
+			// first real one.
+			if event.Error != "" {
+				t.Fatalf("first Monitor frame failed: %#v", event)
+			}
+			if event.Frame != "" {
+				first = event
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for first Monitor frame")
 		}
-	case <-time.After(8 * time.Second):
-		t.Fatal("timed out waiting for first Monitor frame")
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	cacheDeadline := time.Now().Add(3 * time.Second)
 	var cached btopStreamEventMsg
-	for time.Now().Before(deadline) {
+	for time.Now().Before(cacheDeadline) {
 		pool.mu.Lock()
 		session := pool.sessions[target]
 		if session != nil {
@@ -210,18 +220,37 @@ func TestParseTelemetryCollectsSystemAndMultipleGPUs(t *testing.T) {
 	}
 }
 
-func TestBtopStreamCommandUsesMinimumRemotePTYViewport(t *testing.T) {
+func TestBtopStreamCommandUsesRequestedViewportWithoutForcingAFloor(t *testing.T) {
 	if strings.Contains(telemetryScript, btopFrameMarker) {
 		t.Fatal("ordinary telemetry unexpectedly includes btop streaming")
 	}
-	script := btopStreamCommand(72, 12)
+	// The remote PTY size must track the real Monitor viewport (however
+	// small), not a hardcoded 80x24 floor: the layout-fitting ladder is
+	// what decides whether btop can actually render at that size.
+	script := btopStreamCommand(72, 12, "")
 	for _, want := range []string{
-		btopUnavailableMarker, btopFrameMarker, "command -v btop", "stty cols 80 rows 24",
+		btopUnavailableMarker, btopFrameMarker, "command -v btop", "stty cols 72 rows 12",
 		"exec btop",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("btop capture script missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestBtopStreamCommandWithBoxesBuildsTemporaryFittedConfig(t *testing.T) {
+	script := btopStreamCommand(138, 27, "cpu mem net proc")
+	for _, want := range []string{
+		btopUnavailableMarker, btopFrameMarker, "stty cols 138 rows 27",
+		`shown_boxes = "cpu mem net proc"`, "update_ms = 1000",
+		"XDG_CONFIG_HOME=", "mktemp -d", "rm -rf \"$tmp\"",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("fitted btop script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "exec btop") {
+		t.Fatal("fitted btop script must not exec so the temp config gets cleaned up")
 	}
 }
 

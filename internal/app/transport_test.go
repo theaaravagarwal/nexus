@@ -75,6 +75,40 @@ func TestBuildMonitoringSSHArgsUseStrictHostKeyCheckingForPTY(t *testing.T) {
 	}
 }
 
+func TestBuildSSHArgsDropsQuietOnlyForInteractiveMonitoring(t *testing.T) {
+	pty, err := buildMonitoringSSHArgs("alice@example.com", true, "btop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(pty, "-q") {
+		t.Fatalf("PTY monitoring stream must keep ssh diagnostics on stderr (no -q): %v", pty)
+	}
+
+	batch, err := buildMonitoringSSHArgs("alice@example.com", false, "uptime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(batch, "-q") {
+		t.Fatalf("non-interactive monitoring SSH args should still be quiet: %v", batch)
+	}
+
+	interactiveDefault, err := buildSSHArgs("alice@example.com", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(interactiveDefault, "-q") {
+		t.Fatalf("default-profile interactive SSH args should still be quiet: %v", interactiveDefault)
+	}
+
+	nonInteractiveDefault, err := buildSSHArgs("alice@example.com", false, "uptime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(nonInteractiveDefault, "-q") {
+		t.Fatalf("default-profile non-interactive SSH args should still be quiet: %v", nonInteractiveDefault)
+	}
+}
+
 func TestBuildSSHArgsKeepsDefaultNoninteractiveHostKeyBehavior(t *testing.T) {
 	args, err := buildSSHArgs("alice@example.com", false, "uptime")
 	if err != nil {
