@@ -259,10 +259,12 @@ type dashboardModel struct {
 	btopStreamColumns      int
 	btopStreamRows         int
 	btopStreamState        string
+	btopStreamStatus       string
 	btopStreamError        string
 	btopStreamFrames       uint64
 	btopStreamUpdatedAt    time.Time
 	btopStreamRetryAt      time.Time
+	btopStreamPausedAt     time.Time
 	btopResizeGeneration   uint64
 	btopResizePending      bool
 	activities             []activityEvent
@@ -272,6 +274,11 @@ const (
 	dashboardChromeRows  = 4
 	btopResizeSettleTime = 120 * time.Millisecond
 )
+
+// btopStreamPauseGrace is how long a running btop stream is kept alive while
+// a transient overlay (help, settings, command palette, ...) is open before
+// it is torn down. It is a var so tests can shorten it.
+var btopStreamPauseGrace = 30 * time.Second
 
 type btopViewportSettledMsg struct {
 	Generation uint64
@@ -789,14 +796,17 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			loadedConfig.UI.MonitorBtop = &msg.Enabled
 			loadedConfig.UI.ExperimentalFleetBtop = false
 			m.experimentalFleetBtop = msg.Enabled
-			if !msg.Enabled {
-				m.closeBtopStreams()
-			}
 			state := "off"
 			if msg.Enabled {
 				state = "on"
 			}
 			m.notice = "Monitor btop: " + state
+			m.noticeError = false
+			if !msg.Enabled {
+				m.closeBtopStreams()
+				return m, nil
+			}
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry())
 		}
 		m.noticeError = false
 		return m, nil
@@ -944,6 +954,9 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			msg.Target != m.btopStreamTarget || msg.Target != m.selectedTarget() {
 			return m, m.waitForBtopStream()
 		}
+		if msg.Status != "" {
+			m.btopStreamStatus = msg.Status
+		}
 		if msg.Frame != "" {
 			entry := m.telemetry[msg.Target]
 			entry.Current.Target = msg.Target
@@ -955,10 +968,16 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.telemetry[msg.Target] = entry
 			m.btopStreamState = "live"
 			m.btopStreamError = ""
+			m.btopStreamStatus = ""
 			m.btopStreamFrames = msg.FrameCount
 			m.btopStreamUpdatedAt = msg.UpdatedAt
+		} else if msg.Stage == "fitting" {
+			// A stage-only event (no frame yet) keeps the pane in the
+			// connecting state instead of leaving it blank.
+			m.btopStreamState = "connecting"
 		}
 		if msg.Done {
+			m.btopStreamStatus = ""
 			if !msg.Installed && msg.Error == "" {
 				m.btopStreamState = "unavailable"
 				m.btopStreamError = "btop is not installed on this host"
@@ -1430,10 +1449,8 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "h":
 		m.helpOpen = true
-		m.deactivateBtopStream()
 	case ",":
 		m.settingsOpen = true
-		m.deactivateBtopStream()
 	case "o":
 		if m.height >= 16 {
 			m.activityOpen = true
@@ -1452,7 +1469,6 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.commandFiltering = false
 		m.commandCursor = 0
 		m.commandQuery = ""
-		m.deactivateBtopStream()
 	case "k":
 		before := m.selectedTarget()
 		m.moveCursor(-1)
@@ -1579,7 +1595,7 @@ func (m *dashboardModel) closeFleetTelemetry() {
 
 func (m dashboardModel) monitorBtopViewport() (columns, rows int, ok bool) {
 	if !m.experimentalFleetBtop || normalizeWorkspaceMode(m.workspace) != "console" ||
-		m.width < 120 || m.height < 20 {
+		!m.workspaceTabsVisible() {
 		return 0, 0, false
 	}
 	_, workspaceHeight, _ := m.dashboardHeights()
@@ -1593,24 +1609,120 @@ func (m dashboardModel) monitorBtopViewport() (columns, rows int, ok bool) {
 	return columns, rows, true
 }
 
+// minBtopTerminalWidth returns the smallest terminal width, for the given
+// density, that lets the Monitor action rail and the btop pane both fit at
+// or above btopMinColumns. It solves monitorActionWidth/btopFrameViewport
+// numerically instead of duplicating their clamped math.
+func minBtopTerminalWidth(density string) int {
+	probe := dashboardModel{density: density}
+	for width := 1; width <= 600; width++ {
+		actionWidth := probe.monitorActionWidth(width)
+		columns, _ := btopFrameViewport(width-actionWidth, 1000, false, true)
+		if columns >= btopMinColumns {
+			return width
+		}
+	}
+	return 600
+}
+
+// minBtopTerminalHeight returns the smallest terminal height that leaves the
+// btop pane at or above btopMinRows, given whether the activity drawer is
+// open. It solves dashboardHeights/monitorPaneHeights/btopFrameViewport
+// numerically instead of duplicating their clamped math.
+func minBtopTerminalHeight(activityOpen bool) int {
+	probe := dashboardModel{activityOpen: activityOpen}
+	for height := 1; height <= 600; height++ {
+		probe.height = height
+		_, workspaceHeight, _ := probe.dashboardHeights()
+		_, btopHeight := monitorPaneHeights(workspaceHeight)
+		_, rows := btopFrameViewport(1000, btopHeight, false, true)
+		if rows >= btopMinRows {
+			return height
+		}
+	}
+	return 600
+}
+
+// btopGateReason explains why monitorBtopViewport currently refuses to run a
+// live btop stream, mirroring its checks (plus the target/pause checks in
+// ensureBtopStream) so the Monitor pane can tell the user why it is idle
+// instead of showing a generic "connecting" message forever. It returns ""
+// when a stream may run.
+func (m dashboardModel) btopGateReason() string {
+	if !m.experimentalFleetBtop {
+		return "Monitor btop is off · press , to enable it in settings"
+	}
+	if !m.workspaceTabsVisible() {
+		return "Live btop needs the Console workspace tabs (terminal ≥150×28)"
+	}
+	if _, _, ok := m.monitorBtopViewport(); !ok {
+		minWidth := minBtopTerminalWidth(m.density)
+		minHeight := minBtopTerminalHeight(m.activityOpen)
+		reason := fmt.Sprintf("Terminal too small for live btop: need ≥%d×%d, have %d×%d",
+			minWidth, minHeight, m.width, m.height)
+		if m.activityOpen {
+			minHeightWithoutDrawer := minBtopTerminalHeight(false)
+			if m.width >= minWidth && m.height >= minHeightWithoutDrawer {
+				reason += " · press o to close the activity drawer"
+			}
+		}
+		return reason
+	}
+	if m.selectedTarget() == "" {
+		return "Select a host to start."
+	}
+	if m.telemetryPaused() {
+		return "Paused while an overlay is open"
+	}
+	return ""
+}
+
 func (m *dashboardModel) ensureBtopStream() tea.Cmd {
 	columns, rows, visible := m.monitorBtopViewport()
 	target := m.selectedTarget()
-	if !visible || target == "" || !m.telemetryFocused || m.telemetryPaused() {
+	if !visible || target == "" || !m.telemetryFocused || m.terminalRunning {
+		m.btopStreamPausedAt = time.Time{}
 		m.deactivateBtopStream()
 		return nil
 	}
+	if m.telemetryPaused() {
+		// Keep a running session (and its last frame) alive across a
+		// transient overlay such as help, settings, or the command palette,
+		// instead of tearing it down and wasting the SSH session. Only give
+		// up once the overlay has stayed open past the grace period.
+		if m.btopStreamTarget == "" {
+			return nil
+		}
+		if m.btopStreamPausedAt.IsZero() {
+			m.btopStreamPausedAt = time.Now()
+			return m.waitForBtopStream()
+		}
+		if time.Since(m.btopStreamPausedAt) >= btopStreamPauseGrace {
+			m.btopStreamPausedAt = time.Time{}
+			m.deactivateBtopStream()
+			return nil
+		}
+		return m.waitForBtopStream()
+	}
+	m.btopStreamPausedAt = time.Time{}
 	if m.btopResizePending {
 		return m.waitForBtopStream()
 	}
-	if m.btopStreamTarget == target &&
-		m.btopStreamColumns == columns && m.btopStreamRows == rows &&
-		time.Now().Before(m.btopStreamRetryAt) {
-		return m.waitForBtopStream()
+	if m.btopStreamTarget == target && m.btopStreamColumns == columns && m.btopStreamRows == rows {
+		if m.btopStreamRetryAt.IsZero() || time.Now().Before(m.btopStreamRetryAt) {
+			// Same target and viewport as the running (or recently
+			// succeeded) session: just keep listening instead of re-entering
+			// pool.activate every tick, which would otherwise re-derive state
+			// from session.latest and could flip a live pane back to
+			// "connecting" with an empty frame.
+			return m.waitForBtopStream()
+		}
+		m.btopStreamRetryAt = time.Time{}
 	}
 	if m.btopStreamPool == nil {
 		m.btopStreamPool = newBtopStreamPool()
 	}
+	previousTarget := m.btopStreamTarget
 	latest, started := m.btopStreamPool.activate(target, columns, rows)
 	m.btopStreamTarget = target
 	m.btopStreamGeneration = latest.Generation
@@ -1620,8 +1732,19 @@ func (m *dashboardModel) ensureBtopStream() tea.Cmd {
 	if started || latest.Frame == "" {
 		m.btopStreamState = "connecting"
 		m.btopStreamError = ""
-		m.btopStreamFrames = 0
-		m.btopStreamUpdatedAt = time.Time{}
+		m.btopStreamStatus = ""
+		if previousTarget != target {
+			// Only clear the last frame when the target actually changed.
+			// A resize-triggered reconnect to the SAME target keeps showing
+			// the stale frame (with a CONNECTING badge) instead of blanking
+			// the pane while btop re-fits to the new terminal size.
+			m.btopStreamFrames = 0
+			m.btopStreamUpdatedAt = time.Time{}
+			entry := m.telemetry[target]
+			entry.Current.BtopFrame = ""
+			entry.Current.BtopInstalled = false
+			m.telemetry[target] = entry
+		}
 	} else {
 		entry := m.telemetry[target]
 		entry.Current.Target = target
@@ -1630,6 +1753,7 @@ func (m *dashboardModel) ensureBtopStream() tea.Cmd {
 		m.telemetry[target] = entry
 		m.btopStreamState = "live"
 		m.btopStreamError = ""
+		m.btopStreamStatus = ""
 		m.btopStreamFrames = latest.FrameCount
 		m.btopStreamUpdatedAt = latest.UpdatedAt
 	}
@@ -1658,10 +1782,12 @@ func (m *dashboardModel) deactivateBtopStream() {
 	m.btopStreamColumns = 0
 	m.btopStreamRows = 0
 	m.btopStreamState = ""
+	m.btopStreamStatus = ""
 	m.btopStreamError = ""
 	m.btopStreamFrames = 0
 	m.btopStreamUpdatedAt = time.Time{}
 	m.btopStreamRetryAt = time.Time{}
+	m.btopStreamPausedAt = time.Time{}
 }
 
 func (m *dashboardModel) restartBtopStream() {
@@ -3224,6 +3350,18 @@ func (m dashboardModel) btopPanelView(
 		} else {
 			message := "Opening a live remote terminal…"
 			switch m.btopStreamState {
+			case "":
+				// No session is running (or was ever started). Explain the
+				// gate instead of implying one is silently connecting.
+				if reason := m.btopGateReason(); reason != "" {
+					message = reason
+				} else {
+					message = "Preparing a live remote terminal…"
+				}
+			case "connecting":
+				if m.btopStreamStatus != "" {
+					message = m.btopStreamStatus
+				}
 			case "unavailable":
 				message = "btop is not installed on this host"
 			case "error":

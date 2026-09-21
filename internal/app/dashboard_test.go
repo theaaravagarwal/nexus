@@ -742,6 +742,343 @@ func TestDashboardMonitorBtopWaitsForACompleteMinimumViewport(t *testing.T) {
 	}
 }
 
+func TestDashboardBtopGateReasonSettingOff(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = false
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 200, 50
+	want := "Monitor btop is off · press , to enable it in settings"
+	if got := model.btopGateReason(); got != want {
+		t.Fatalf("gate reason=%q want=%q", got, want)
+	}
+}
+
+func TestDashboardBtopGateReasonTabsOff(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = false
+	model.workspace = "console"
+	model.width, model.height = 200, 50
+	want := "Live btop needs the Console workspace tabs (terminal ≥150×28)"
+	if got := model.btopGateReason(); got != want {
+		t.Fatalf("gate reason=%q want=%q", got, want)
+	}
+}
+
+func TestDashboardBtopGateReasonTooSmall(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 150, 28
+	if _, _, ok := model.monitorBtopViewport(); ok {
+		t.Fatal("expected 150x28 to be too small for a live btop viewport")
+	}
+	minWidth := minBtopTerminalWidth(model.density)
+	minHeight := minBtopTerminalHeight(model.activityOpen)
+	want := fmt.Sprintf("Terminal too small for live btop: need ≥%d×%d, have %d×%d", minWidth, minHeight, 150, 28)
+	if got := model.btopGateReason(); got != want {
+		t.Fatalf("gate reason=%q want=%q", got, want)
+	}
+	if strings.Contains(want, "press o") {
+		t.Fatalf("unexpected drawer hint in %q", want)
+	}
+	model.plain = true
+	view := model.View()
+	if !strings.Contains(view, want) {
+		t.Fatalf("View() missing gate reason:\n%s", view)
+	}
+	if strings.Contains(view, "Opening a live remote terminal") {
+		t.Fatalf("View() showed the generic connecting message despite no session:\n%s", view)
+	}
+}
+
+func TestDashboardBtopGateReasonSuggestsClosingDrawer(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.activityOpen = true
+	model.width = 200
+	minHeightOpen := minBtopTerminalHeight(true)
+	minHeightClosed := minBtopTerminalHeight(false)
+	if minHeightOpen <= minHeightClosed {
+		t.Fatalf("expected the activity drawer to raise the height requirement: open=%d closed=%d", minHeightOpen, minHeightClosed)
+	}
+	model.height = minHeightOpen - 1
+	if model.height < minHeightClosed {
+		t.Fatalf("test needs a height that fits once the drawer is closed: height=%d closed=%d", model.height, minHeightClosed)
+	}
+	if _, _, ok := model.monitorBtopViewport(); ok {
+		t.Fatal("expected viewport to still be too small with the drawer open")
+	}
+	got := model.btopGateReason()
+	if !strings.HasSuffix(got, " · press o to close the activity drawer") {
+		t.Fatalf("gate reason missing drawer hint: %q", got)
+	}
+}
+
+func TestDashboardBtopGateReasonNoTarget(t *testing.T) {
+	model := newDashboardModel(nil)
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 200, 50
+	if model.selectedTarget() != "" {
+		t.Fatalf("expected no selected target, got %q", model.selectedTarget())
+	}
+	want := "Select a host to start."
+	if got := model.btopGateReason(); got != want {
+		t.Fatalf("gate reason=%q want=%q", got, want)
+	}
+}
+
+func TestDashboardBtopGateReasonPausedByOverlay(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 200, 50
+	model.helpOpen = true
+	want := "Paused while an overlay is open"
+	if got := model.btopGateReason(); got != want {
+		t.Fatalf("gate reason=%q want=%q", got, want)
+	}
+}
+
+func TestDashboardBtopStreamEventUpdatesStatusLine(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.plain = true
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 200, 50
+	target := model.selectedTarget()
+	model.btopStreamPool = newBtopStreamPool()
+	model.btopStreamTarget = target
+	model.btopStreamGeneration = 1
+	model.btopStreamState = "connecting"
+	t.Cleanup(model.closeBtopStreams)
+
+	status := "Fitting btop layout to 138×27 (cpu proc)…"
+	updated, cmd := model.Update(btopStreamEventMsg{
+		Generation: 1, Target: target, Stage: "fitting", Status: status,
+	})
+	model = updated.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("expected the stream to keep waiting for more events")
+	}
+	if model.btopStreamStatus != status {
+		t.Fatalf("btopStreamStatus=%q want=%q", model.btopStreamStatus, status)
+	}
+	if model.btopStreamState != "connecting" {
+		t.Fatalf("btopStreamState=%q want connecting", model.btopStreamState)
+	}
+	view := model.View()
+	if !strings.Contains(view, status) {
+		t.Fatalf("View() missing status line:\n%s", view)
+	}
+
+	updated, _ = model.Update(btopStreamEventMsg{
+		Generation: 1, Target: target, Frame: "┌ frame ┐", FrameCount: 1, UpdatedAt: time.Now(),
+	})
+	model = updated.(dashboardModel)
+	if model.btopStreamStatus != "" {
+		t.Fatalf("btopStreamStatus should clear once a frame arrives, got %q", model.btopStreamStatus)
+	}
+}
+
+func TestDashboardBtopEnsureStreamReuseGuardKeepsLiveState(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+	target := model.selectedTarget()
+	columns, rows, ok := model.monitorBtopViewport()
+	if !ok {
+		t.Fatal("expected a visible Monitor btop viewport")
+	}
+
+	pool := newBtopStreamPool()
+	pool.active = target
+	pool.sessions[target] = &pooledBtopStream{
+		target: target, generation: 9, columns: columns, rows: rows,
+		running: true, cancel: func() {},
+		// latest.Frame intentionally empty: this reproduces the historical
+		// bug where re-entering pool.activate every tick re-derived state
+		// from a stale/empty session.latest and flipped a live pane back to
+		// "connecting".
+		latest: btopStreamEventMsg{Generation: 9, Target: target},
+	}
+	model.btopStreamPool = pool
+	model.btopStreamTarget = target
+	model.btopStreamGeneration = 9
+	model.btopStreamColumns = columns
+	model.btopStreamRows = rows
+	model.btopStreamState = "live"
+	model.btopStreamFrames = 42
+	model.btopStreamRetryAt = time.Time{}
+	t.Cleanup(model.closeBtopStreams)
+
+	for i := 0; i < 2; i++ {
+		model.ensureBtopStream()
+		if model.btopStreamState != "live" {
+			t.Fatalf("iteration %d: btopStreamState=%q want live", i, model.btopStreamState)
+		}
+		if model.btopStreamFrames != 42 {
+			t.Fatalf("iteration %d: btopStreamFrames=%d want 42", i, model.btopStreamFrames)
+		}
+	}
+}
+
+func TestDashboardBtopOverlayPauseKeepsSessionAndFrame(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+	target := model.selectedTarget()
+	columns, rows, ok := model.monitorBtopViewport()
+	if !ok {
+		t.Fatal("expected a visible Monitor btop viewport")
+	}
+
+	cancelled := false
+	pool := newBtopStreamPool()
+	pool.active = target
+	pool.sessions[target] = &pooledBtopStream{
+		target: target, generation: 3, columns: columns, rows: rows,
+		running: true, cancel: func() { cancelled = true },
+		latest: btopStreamEventMsg{Generation: 3, Target: target, Frame: "┌ frame ┐"},
+	}
+	model.btopStreamPool = pool
+	model.btopStreamTarget = target
+	model.btopStreamGeneration = 3
+	model.btopStreamColumns = columns
+	model.btopStreamRows = rows
+	model.btopStreamState = "live"
+	model.telemetry[target] = hostTelemetry{Current: telemetrySample{
+		Target: target, BtopInstalled: true, BtopFrame: "┌ frame ┐",
+	}}
+	t.Cleanup(model.closeBtopStreams)
+
+	model.helpOpen = true
+	model.ensureBtopStream()
+	if cancelled {
+		t.Fatal("overlay pause tore down the running btop session immediately")
+	}
+	if model.btopStreamTarget != target {
+		t.Fatalf("btopStreamTarget=%q want %q to stay set while paused", model.btopStreamTarget, target)
+	}
+	if model.telemetry[target].Current.BtopFrame == "" {
+		t.Fatal("overlay pause cleared the last known btop frame")
+	}
+	if model.btopStreamPausedAt.IsZero() {
+		t.Fatal("expected btopStreamPausedAt to be recorded once paused")
+	}
+}
+
+func TestDashboardBtopOverlayPauseExpiresAfterGracePeriod(t *testing.T) {
+	original := btopStreamPauseGrace
+	btopStreamPauseGrace = 5 * time.Millisecond
+	t.Cleanup(func() { btopStreamPauseGrace = original })
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+	target := model.selectedTarget()
+	columns, rows, ok := model.monitorBtopViewport()
+	if !ok {
+		t.Fatal("expected a visible Monitor btop viewport")
+	}
+
+	cancelled := false
+	pool := newBtopStreamPool()
+	pool.active = target
+	pool.sessions[target] = &pooledBtopStream{
+		target: target, generation: 5, columns: columns, rows: rows,
+		running: true, cancel: func() { cancelled = true },
+		latest: btopStreamEventMsg{Generation: 5, Target: target, Frame: "┌ frame ┐"},
+	}
+	model.btopStreamPool = pool
+	model.btopStreamTarget = target
+	model.btopStreamGeneration = 5
+	model.btopStreamColumns = columns
+	model.btopStreamRows = rows
+	model.btopStreamState = "live"
+	t.Cleanup(model.closeBtopStreams)
+
+	model.helpOpen = true
+	model.ensureBtopStream()
+	if cancelled || model.btopStreamTarget == "" {
+		t.Fatal("expected the session to survive the first paused tick")
+	}
+	time.Sleep(20 * time.Millisecond)
+	model.ensureBtopStream()
+	if !cancelled {
+		t.Fatal("expected the session to be torn down once the pause grace period elapsed")
+	}
+	if model.btopStreamTarget != "" {
+		t.Fatalf("btopStreamTarget=%q want empty after grace expiry", model.btopStreamTarget)
+	}
+}
+
+func TestDashboardBtopResizeReconnectKeepsLastFrameForSameTarget(t *testing.T) {
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = true
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+	target := model.selectedTarget()
+	columns, rows, ok := model.monitorBtopViewport()
+	if !ok {
+		t.Fatal("expected a visible Monitor btop viewport")
+	}
+	model.telemetry[target] = hostTelemetry{Current: telemetrySample{
+		Target: target, BtopInstalled: true, BtopFrame: "┌ stale frame ┐",
+	}}
+	model.btopStreamPool = newBtopStreamPool()
+	model.btopStreamTarget = target
+	model.btopStreamColumns = columns - 1
+	model.btopStreamRows = rows
+	model.btopStreamState = "live"
+	model.btopStreamFrames = 7
+	t.Cleanup(model.closeBtopStreams)
+
+	model.ensureBtopStream()
+	if model.btopStreamState != "connecting" {
+		t.Fatalf("btopStreamState=%q want connecting after a viewport resize", model.btopStreamState)
+	}
+	if model.telemetry[target].Current.BtopFrame != "┌ stale frame ┐" {
+		t.Fatalf("resize reconnect cleared the last frame for the same target: %#v", model.telemetry[target].Current)
+	}
+}
+
+func TestDashboardSettingsReenableMonitorBtopRestartsStream(t *testing.T) {
+	previous := loadedConfig
+	t.Cleanup(func() { loadedConfig = previous })
+	loadedConfig = defaultAppConfig()
+
+	model := newDashboardModel([]string{"alice@one"})
+	model.experimentalFleetBtop = false
+	model.experimentalTabs = true
+	model.workspace = "console"
+	model.width, model.height = 180, 40
+
+	updated, cmd := model.Update(settingsSaveMsg{Key: "monitor_btop", Enabled: true})
+	model = updated.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("expected re-enabling Monitor btop to return a non-nil command")
+	}
+	if !model.experimentalFleetBtop {
+		t.Fatal("expected Monitor btop to be enabled")
+	}
+}
+
 func TestDashboardProcessGlanceDistinguishesSnapshotStates(t *testing.T) {
 	model := newDashboardModel([]string{"alice@one"})
 	model.plain = true
