@@ -14,7 +14,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - `pull` opens media from the real destination directory rather than the current working directory.
 - Per-host command overrides no longer drop a global `confirm: true` setting.
 - Config directory permissions tightened to 0700 on startup.
-- Stream failures (auth, host key, timeouts, watchdog) are now explained in the Monitor pane.
+- Stream failures (auth, host key, timeouts, watchdog) are now explained in the Monitor pane; harmless ssh warnings such as "ControlSocket … already exists, disabling multiplexing" are no longer shown as errors.
 
 ### Changed
 
@@ -27,6 +27,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- Live btop for Windows hosts: when the remote shell is cmd.exe, the Monitor runs btop4win inside a headless console over a non-PTY session (no WSL involved), with a PowerShell supervisor that tears it down when the session ends. Requires btop4win on the SSH user's PATH.
 - `docs/ARCHITECTURE.md` with design and implementation notes.
 - `Makefile` with `make check` and `make bench` targets.
 - Benchmarks for dashboard rendering and text truncation.

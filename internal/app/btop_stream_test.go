@@ -18,9 +18,30 @@ import (
 // dir only, so exec.Command("ssh", ...) inside streamRemoteBtop resolves to
 // it hermetically (see docs/ARCHITECTURE.md's "hermetic tests" convention
 // and the fake-binary pattern already used by e2e_test.go).
+// btopFakeHandlesVer marks a fake ssh script that answers the platform
+// probe itself; every other fake gets a POSIX-style literal "%OS%" answer
+// injected so the stream treats the host as Unix.
+const btopFakeHandlesVer = "# NEXUS_FAKE_HANDLES_VER"
+
 func setupBtopFakeSSH(t *testing.T, script string) string {
 	t.Helper()
 	dir := t.TempDir()
+	btopPlatformCache.Range(func(key, _ any) bool {
+		btopPlatformCache.Delete(key)
+		return true
+	})
+	t.Cleanup(func() {
+		btopPlatformCache.Range(func(key, _ any) bool {
+			btopPlatformCache.Delete(key)
+			return true
+		})
+	})
+	if !strings.Contains(script, btopFakeHandlesVer) {
+		shebang, rest, _ := strings.Cut(script, "\n")
+		script = shebang + "\n" + `eval "nexus_last=\${$#}"
+if [ "$nexus_last" = "echo %OS%" ]; then echo "%OS%"; exit 0; fi
+` + rest
+	}
 	writeExecutable(t, filepath.Join(dir, "ssh"), script)
 	// Prepend (not replace): the fake ssh script itself still needs real
 	// coreutils such as sleep on PATH.
@@ -395,5 +416,97 @@ done
 		case <-ctx.Done():
 			t.Fatal("timed out waiting for the watchdog Done event")
 		}
+	}
+}
+
+func TestBtopStreamWindowsHostUsesHeadlessConsoleWithoutPTY(t *testing.T) {
+	const columns, rows = 100, 30
+	argsPath := filepath.Join(t.TempDir(), "args.txt")
+	script := fmt.Sprintf(`#!/bin/sh
+%s
+eval "last=\${$#}"
+if [ "$last" = "echo %%OS%%" ]; then printf 'Windows_NT\r\n'; exit 0; fi
+printf '%%s\n' "$@" > %q
+printf 'NEXUS_BTOP_FRAME_BEGIN\r\n'
+%s
+`, btopFakeHandlesVer, argsPath, btopFakeLiveScript(rows, true))
+	setupBtopFakeSSH(t, script)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := make(chan btopStreamEventMsg, 1)
+	go streamRemoteBtop(ctx, "robot@windows.example", 3, columns, rows, events)
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				t.Fatal("stream ended before a frame")
+			}
+			if event.Error != "" {
+				t.Fatalf("stream error: %s", event.Error)
+			}
+			if event.Frame == "" {
+				continue
+			}
+			if !event.Installed || event.Stage != "live" {
+				t.Fatalf("unexpected first frame event: %#v", event)
+			}
+			goto verify
+		case <-deadline:
+			t.Fatal("timed out waiting for a Windows frame")
+		}
+	}
+verify:
+	if platform, ok := btopPlatformCache.Load("robot@windows.example"); !ok || platform != btopPlatformWindows {
+		t.Fatalf("platform not cached as windows: %v %v", platform, ok)
+	}
+	raw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for _, arg := range args {
+		if arg == "-t" {
+			t.Fatalf("Windows stream must not request a PTY: %v", args)
+		}
+	}
+	command := args[len(args)-1]
+	const prefix = "powershell -NoProfile -NonInteractive -EncodedCommand "
+	if !strings.HasPrefix(command, prefix) {
+		t.Fatalf("remote command is not an encoded PowerShell command: %q", command)
+	}
+	decoded, err := decodePowerShellCommand(strings.TrimPrefix(command, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Get-Command btop",
+		"conhost.exe --headless --width 100 --height 30 -- btop",
+		"waitfor /t 3600 NexusBtop",
+		"GetStdHandle(-11)",
+		"WriteFile($h, $buf, 1",
+		"taskkill /F /T /PID",
+		btopFrameMarker, btopUnavailableMarker,
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("supervisor script missing %q:\n%s", want, decoded)
+		}
+	}
+	if strings.Contains(decoded, "wsl") {
+		t.Fatalf("supervisor script must not involve WSL:\n%s", decoded)
+	}
+}
+
+func TestStripSSHNoiseKeepsRealErrors(t *testing.T) {
+	noise := "ControlSocket /tmp/mux already exists, disabling multiplexing\nWarning: Permanently added 'h' (ED25519) to the list of known hosts.\n#< CLIXML\n<Objs Version=\"1.1.0.1\"></Objs>\n"
+	if got := strings.TrimSpace(stripSSHNoise(noise)); got != "" {
+		t.Fatalf("noise survived: %q", got)
+	}
+	if got := friendlyBtopStreamError(noise, nil); got != "btop stream ended · press r to retry" {
+		t.Fatalf("noise-only stderr mapped to %q", got)
+	}
+	if got := friendlyBtopStreamError(noise+"Permission denied (publickey).\n", nil); !strings.Contains(got, "authentication") {
+		t.Fatalf("real error lost: %q", got)
 	}
 }

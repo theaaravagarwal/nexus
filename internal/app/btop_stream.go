@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -244,6 +246,28 @@ func streamRemoteBtopFrom(
 ) string {
 	defer close(events)
 	columns, rows = clampBtopViewport(columns, rows)
+	platform := detectBtopPlatform(ctx, target)
+	if ctx.Err() != nil {
+		return startBoxes
+	}
+	if platform == btopPlatformWindows {
+		// btop4win reads its own btop.conf next to the executable, so there
+		// is no layout ladder: report the size it asked for instead.
+		var frameCount uint64
+		tooSmall, neededWidth, neededHeight := runBtopStreamAttempt(
+			ctx, target, generation, columns, rows, "", platform, events, &frameCount,
+		)
+		if tooSmall {
+			publishBtopStreamEvent(ctx, events, btopStreamEventMsg{
+				Generation: generation, Target: target, Done: true, Installed: true,
+				Error: fmt.Sprintf(
+					"Monitor pane %d×%d is too small for btop4win (needs %d×%d) · enlarge the terminal",
+					columns, rows, neededWidth, neededHeight,
+				),
+			})
+		}
+		return ""
+	}
 	ladder := btopFallbackLadder(startBoxes, columns, rows)
 	logVerbose("btop stream %s: viewport=%dx%d start-boxes=%q ladder=%v", target, columns, rows, startBoxes, ladder)
 
@@ -255,7 +279,7 @@ func streamRemoteBtopFrom(
 		}
 		lastBoxes = boxes
 		tooSmall, neededWidth, neededHeight := runBtopStreamAttempt(
-			ctx, target, generation, columns, rows, boxes, events, &frameCount,
+			ctx, target, generation, columns, rows, boxes, platform, events, &frameCount,
 		)
 		if !tooSmall {
 			// Every other outcome (live stream ended, unavailable, auth
@@ -352,12 +376,19 @@ func runBtopStreamAttempt(
 	generation uint64,
 	columns, rows int,
 	boxes string,
+	platform string,
 	events chan btopStreamEventMsg,
 	frameCount *uint64,
 ) (tooSmall bool, neededWidth, neededHeight int) {
-	logVerbose("btop stream %s: session start viewport=%dx%d boxes=%q", target, columns, rows, boxes)
-	script := remoteShellCommand("sh", btopStreamCommand(columns, rows, boxes))
-	args, err := buildMonitoringSSHArgs(target, true, script)
+	logVerbose("btop stream %s: session start viewport=%dx%d boxes=%q platform=%s", target, columns, rows, boxes, platform)
+	var args []string
+	var err error
+	if platform == btopPlatformWindows {
+		args, err = buildMonitoringSSHArgs(target, false, windowsBtopStreamCommand(columns, rows, windowsBtopSignal()))
+	} else {
+		script := remoteShellCommand("sh", btopStreamCommand(columns, rows, boxes))
+		args, err = buildMonitoringSSHArgs(target, true, script)
+	}
 	if err != nil {
 		publishBtopStreamEvent(ctx, events, btopStreamEventMsg{
 			Generation: generation, Target: target, Done: true, Error: sanitizeTerminalText(err.Error()),
@@ -639,7 +670,7 @@ func runBtopStreamAttempt(
 }
 
 func friendlyBtopStreamError(stderr string, err error) string {
-	detail := strings.TrimSpace(stderr)
+	detail := strings.TrimSpace(stripSSHNoise(stderr))
 	if err != nil {
 		if detail != "" {
 			detail += ": "
@@ -713,4 +744,142 @@ func skipEscapeSequence(frame string, start int) int {
 		return len(frame) - 1
 	}
 	return start
+}
+
+// Remote platforms the Monitor stream knows how to drive.
+const (
+	btopPlatformUnix    = "unix"
+	btopPlatformWindows = "windows"
+)
+
+// btopPlatformCache remembers, per target, whether the remote shell is
+// Windows cmd.exe or a POSIX sh; probing costs one short ssh round trip and
+// the answer never changes within a process.
+var btopPlatformCache sync.Map
+
+// btopPlatformProbe is echoed by the remote shell: cmd.exe expands %OS% to
+// "Windows_NT", a POSIX shell prints it literally. (`ver` would be the
+// obvious probe, but at least one Windows sshd resets the connection on it.)
+const btopPlatformProbe = "echo %OS%"
+
+// detectBtopPlatform runs the probe over a non-PTY session. Transport
+// failures are not cached so the real attempt can explain them.
+func detectBtopPlatform(ctx context.Context, target string) string {
+	if cached, ok := btopPlatformCache.Load(target); ok {
+		return cached.(string)
+	}
+	args, err := buildMonitoringSSHArgs(target, false, btopPlatformProbe)
+	if err != nil {
+		return btopPlatformUnix
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	output, runErr := exec.CommandContext(probeCtx, "ssh", args...).Output()
+	platform := btopPlatformUnix
+	if strings.Contains(string(output), "Windows_NT") {
+		platform = btopPlatformWindows
+	}
+	var exitErr *exec.ExitError
+	if runErr == nil || errors.As(runErr, &exitErr) {
+		btopPlatformCache.Store(target, platform)
+	}
+	logVerbose("btop stream %s: platform=%s (probe err=%v)", target, platform, runErr)
+	return platform
+}
+
+// windowsBtopStreamScript is the PowerShell supervisor that runs btop4win
+// on a Windows OpenSSH host without a PTY and without touching WSL:
+//
+//   - Windows OpenSSH runs commands through cmd.exe, and a user AutoRun hook
+//     may start WSL for SSH sessions. On a non-PTY session that hook sees EOF
+//     on stdin and returns at once, so the command still runs; on a PTY
+//     session it would wait for input forever, so a PTY is never requested.
+//   - btop4win insists on a console, so it runs inside its own headless
+//     pseudoconsole (conhost.exe --headless), whose VT output streams over
+//     the ssh channel. The pseudoconsole closes as soon as its stdin ends,
+//     so `waitfor` keeps that stdin open without ever writing to it.
+//   - sshd on Windows kills nothing when the session ends (not even on a
+//     dropped connection), and with ControlMaster the per-connection sshd
+//     outlives every session, so the only reliable end-of-session signal is
+//     the stdout pipe closing. .NET's console stream hides that error, so
+//     the supervisor heartbeats a NUL byte through kernel32 WriteFile every
+//     1.5 s (the virtual terminal ignores NUL) and kills the tree when the
+//     write fails.
+func windowsBtopStreamScript(columns, rows int, signal string) string {
+	return fmt.Sprintf(`$ErrorActionPreference = 'SilentlyContinue'
+if (-not (Get-Command btop -ErrorAction SilentlyContinue)) { Write-Output '%s'; exit 0 }
+$sig = @'
+[DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
+'@
+$k = Add-Type -MemberDefinition $sig -Name NexusK32 -Namespace Nexus -PassThru
+$h = $k::GetStdHandle(-11)
+Write-Output '%s'
+[Console]::Out.Flush()
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = 'cmd.exe'
+$psi.Arguments = '/d /c waitfor /t 3600 %s 2>NUL | conhost.exe --headless --width %d --height %d -- btop'
+$psi.UseShellExecute = $false
+$p = [System.Diagnostics.Process]::Start($psi)
+$buf = [byte[]](0)
+[uint32]$n = 0
+while (-not $p.HasExited) {
+  Start-Sleep -Milliseconds 1500
+  if (-not $k::WriteFile($h, $buf, 1, [ref]$n, [IntPtr]::Zero)) { break }
+}
+if (-not $p.HasExited) { taskkill /F /T /PID $p.Id | Out-Null }
+`, btopUnavailableMarker, btopFrameMarker, signal, columns, rows)
+}
+
+// windowsBtopStreamCommand wraps the supervisor script as an encoded
+// PowerShell command, which survives cmd.exe's quoting rules untouched.
+func windowsBtopStreamCommand(columns, rows int, signal string) string {
+	return "powershell -NoProfile -NonInteractive -EncodedCommand " +
+		encodePowerShellCommand(windowsBtopStreamScript(columns, rows, signal))
+}
+
+func encodePowerShellCommand(script string) string {
+	units := utf16.Encode([]rune(script))
+	raw := make([]byte, 0, 2*len(units))
+	for _, unit := range units {
+		raw = append(raw, byte(unit), byte(unit>>8))
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func decodePowerShellCommand(encoded string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", err
+	}
+	units := make([]uint16, 0, len(raw)/2)
+	for i := 0; i+1 < len(raw); i += 2 {
+		units = append(units, uint16(raw[i])|uint16(raw[i+1])<<8)
+	}
+	return string(utf16.Decode(units)), nil
+}
+
+// windowsBtopSignal names the waitfor event that keeps the pseudoconsole's
+// stdin open; waitfor accepts only ASCII letters and digits.
+func windowsBtopSignal() string {
+	return fmt.Sprintf("NexusBtop%x", uint32(time.Now().UnixNano()))
+}
+
+// stripSSHNoise drops ssh warnings that are not failures, so they never
+// masquerade as the reason a stream ended.
+func stripSSHNoise(stderr string) string {
+	lines := strings.Split(stderr, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		switch {
+		case strings.Contains(lower, "controlsocket") && strings.Contains(lower, "disabling multiplexing"):
+		case strings.Contains(lower, "permanently added"):
+		case strings.HasPrefix(strings.TrimSpace(line), "#< CLIXML"), strings.HasPrefix(strings.TrimSpace(line), "<Objs "):
+			// PowerShell -NonInteractive progress stream, not an error.
+		default:
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
