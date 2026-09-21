@@ -775,7 +775,7 @@ func TestDashboardBtopGateReasonTooSmall(t *testing.T) {
 	if _, _, ok := model.monitorBtopViewport(); ok {
 		t.Fatal("expected 150x28 to be too small for a live btop viewport")
 	}
-	minWidth := minBtopTerminalWidth(model.density)
+	minWidth := max(150, minBtopTerminalWidth(model.density)) // tabs already need 150 columns
 	minHeight := minBtopTerminalHeight(model.activityOpen)
 	want := fmt.Sprintf("Terminal too small for live btop: need ≥%d×%d, have %d×%d", minWidth, minHeight, 150, 28)
 	if got := model.btopGateReason(); got != want {

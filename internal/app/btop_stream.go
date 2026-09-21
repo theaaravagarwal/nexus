@@ -449,12 +449,8 @@ func runBtopStreamAttempt(
 	}
 
 	tryRender := func() (isTooSmall, publishFailed bool) {
-		frame := strings.TrimRight(emulator.Render(), "\r\n")
-		plain := ansi.Strip(frame)
-		if strings.Contains(plain, btopTooSmallMarker) {
-			neededWidth, neededHeight = parseBtopNeededSize(plain)
-			return true, false
-		}
+		// Rendering the virtual terminal (thousands of cells) is the
+		// expensive step, so decide whether a frame is due before doing it.
 		if !dirty {
 			return false, false
 		}
@@ -462,14 +458,28 @@ func runBtopStreamAttempt(
 		frameDue := lastPublish.IsZero() || now.Sub(lastPublish) >= btopStreamFrameInterval
 		fallbackReady := now.Sub(streamStartedAt) >= btopStreamFallbackDelay &&
 			now.Sub(lastSyncAt) >= btopStreamFallbackWindow
-		if !frameDue || (!syncPending && !fallbackReady) {
+		renderDue := frameDue && (syncPending || fallbackReady)
+		// Before the first accepted frame, look at every new chunk so the
+		// "Terminal size too small" screen is caught immediately.
+		if !renderDue && *frameCount > 0 {
 			return false, false
+		}
+		frame := strings.TrimRight(emulator.Render(), "\r\n")
+		if *frameCount == 0 {
+			plain := ansi.Strip(frame)
+			if strings.Contains(plain, btopTooSmallMarker) {
+				neededWidth, neededHeight = parseBtopNeededSize(plain)
+				return true, false
+			}
+			if !renderDue {
+				return false, false
+			}
 		}
 		qualifies := false
 		if *frameCount == 0 {
 			qualifies = btopFrameScore(frame) >= 1000
 		} else {
-			qualifies = strings.TrimSpace(plain) != ""
+			qualifies = frameHasVisibleText(frame)
 		}
 		dirty = false
 		syncPending = false
@@ -653,4 +663,54 @@ func friendlyBtopStreamError(stderr string, err error) string {
 	default:
 		return truncateText(sanitizeTerminalText(detail), 120)
 	}
+}
+
+// frameHasVisibleText reports whether a rendered frame contains any printable
+// non-space character outside escape sequences, without allocating (the
+// ansi.Strip + TrimSpace equivalent costs a full copy per frame).
+func frameHasVisibleText(frame string) bool {
+	for i := 0; i < len(frame); i++ {
+		c := frame[i]
+		if c == 0x1b {
+			i = skipEscapeSequence(frame, i)
+			continue
+		}
+		if c > 0x20 && c != 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// skipEscapeSequence returns the index of the last byte of the escape
+// sequence starting at frame[start] (CSI or OSC); other sequences are
+// treated as the lone ESC byte.
+func skipEscapeSequence(frame string, start int) int {
+	if start+1 >= len(frame) {
+		return start
+	}
+	switch frame[start+1] {
+	case '[':
+		end := start + 2
+		for end < len(frame) && (frame[end] < 0x40 || frame[end] > 0x7e) {
+			end++
+		}
+		if end >= len(frame) {
+			return len(frame) - 1
+		}
+		return end
+	case ']':
+		end := start + 2
+		for end < len(frame) {
+			if frame[end] == 0x07 {
+				return end
+			}
+			if frame[end] == 0x1b && end+1 < len(frame) && frame[end+1] == '\\' {
+				return end + 1
+			}
+			end++
+		}
+		return len(frame) - 1
+	}
+	return start
 }

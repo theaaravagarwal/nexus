@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -315,12 +316,27 @@ type dashboardModel struct {
 // so this is keyed on btopStreamFrames -- bumped exactly when
 // entry.Current.BtopFrame actually changes -- plus the viewport size the
 // frame was fit to.
+// traceMessages logs every tea.Msg type reaching Update (NEXUS_TRACE_MESSAGES=1
+// with --verbose); used to find message storms that force needless renders.
+var traceMessages = os.Getenv("NEXUS_TRACE_MESSAGES") != ""
+
 type dashboardBtopFrameCache struct {
 	valid  bool
 	frames uint64
 	width  int
 	height int
 	lines  []string
+	// twins are ASCII stand-ins with the same cell width as lines, each
+	// tagged with a unique zero-width marker (see btopTwinLine). Layout code
+	// composes with the twins so lipgloss never measures the ANSI-dense
+	// frame, then swaps the real lines back in (btopSwapTwins).
+	twins []string
+	// deferSwap is set by View() so consoleWorkspaceView leaves the twins in
+	// place and records them here; View() swaps the real rows back in after
+	// its own joins, right before finishView.
+	deferSwap    bool
+	pendingTwins []string
+	pendingLines []string
 }
 
 // dashboardRenderCache memoizes the theme/plain-derived values that used to
@@ -704,10 +720,13 @@ func (m dashboardModel) updateTransfer(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	if traceMessages {
+		logVerbose("update %T", message)
+	}
 	switch msg := message.(type) {
 	case tea.FocusMsg:
 		m.telemetryFocused = true
-		return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
+		return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), m.restartTelemetryTick(100*time.Millisecond))
 	case tea.BlurMsg:
 		m.telemetryFocused = false
 		m.deactivateBtopStream()
@@ -775,7 +794,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(
 				operationCmd,
 				tea.Tick(delay, func(time.Time) tea.Msg { return probeTickMsg{} }),
-				telemetryTick(100*time.Millisecond, m.telemetryGen),
+				m.restartTelemetryTick(100*time.Millisecond),
 			)
 		}
 		return m, nil
@@ -813,16 +832,12 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = "System snapshot refreshed for " + m.displayNameForTarget(msg.Target)
 		m.noticeError = false
 		usedAt := time.Now()
-		if m.statePath != "" {
-			if err := recordHostSuccess(m.statePath, msg.Target, usedAt); err != nil {
-				logVerbose("failed to record host activity: %v", err)
-			}
-		}
+		hostCmd := m.recordHostSuccessCmd(msg.Target, usedAt)
 		m.markHostUsed(msg.Target, usedAt)
 		if msg.OperationID == m.operationID {
-			return m, m.finishOperation("success", "System details updated", "")
+			return m, tea.Batch(hostCmd, m.finishOperation("success", "System details updated", ""))
 		}
-		return m, nil
+		return m, hostCmd
 	case themeSaveMsg:
 		m.themeSaving = false
 		if msg.Err != nil {
@@ -939,11 +954,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.finishOperation("error", label+" failed", ""), m.ensureBtopStream())
 		}
 		usedAt := time.Now()
-		if m.statePath != "" {
-			if err := recordHostSuccess(m.statePath, msg.Selection.Host, usedAt); err != nil {
-				logVerbose("failed to record host activity: %v", err)
-			}
-		}
+		hostCmd := m.recordHostSuccessCmd(msg.Selection.Host, usedAt)
 		m.markHostUsed(msg.Selection.Host, usedAt)
 		summary := label + " finished"
 		if msg.Selection.Action == actionSSH {
@@ -954,7 +965,7 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.notice = summary
 		m.noticeError = false
-		return m, tea.Batch(m.finishOperation("success", summary, ""), m.ensureBtopStream())
+		return m, tea.Batch(hostCmd, m.finishOperation("success", summary, ""), m.ensureBtopStream())
 	case configuredCommandMsg:
 		m.commandRunning = false
 		if m.commandResult == nil {
@@ -967,19 +978,14 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.finishOperation("error", "Command failed", msg.Output+"\n"+msg.Err.Error())
 			}
 			return m, nil
-		} else {
-			usedAt := time.Now()
-			if m.statePath != "" {
-				if err := recordHostSuccess(m.statePath, m.commandResult.Host, usedAt); err != nil {
-					logVerbose("failed to record host activity: %v", err)
-				}
-			}
-			m.markHostUsed(m.commandResult.Host, usedAt)
 		}
+		usedAt := time.Now()
+		hostCmd := m.recordHostSuccessCmd(m.commandResult.Host, usedAt)
+		m.markHostUsed(m.commandResult.Host, usedAt)
 		if msg.OperationID == m.operationID {
-			return m, m.finishOperation("success", "Command finished", msg.Output)
+			return m, tea.Batch(hostCmd, m.finishOperation("success", "Command finished", msg.Output))
 		}
-		return m, nil
+		return m, hostCmd
 	case operationPersistMsg:
 		if msg.Err != nil {
 			logVerbose("failed to record latest operation: %v", msg.Err)
@@ -1003,7 +1009,14 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		workspace := normalizeWorkspaceMode(m.workspace)
 		if workspace == "console" || workspace == "fleet" {
-			return m, tea.Batch(btopCommand, fleetCommand, telemetryTick(time.Second, m.telemetryGen))
+			// Live data (btop frames, fleet samples) re-renders on arrival;
+			// this tick only refreshes relative ages, so keep it slow unless
+			// a stream is still connecting and the pane shows progress.
+			delay := telemetryIdleTick
+			if m.btopStreamState == "connecting" {
+				delay = time.Second
+			}
+			return m, tea.Batch(btopCommand, fleetCommand, telemetryTick(delay, m.telemetryGen))
 		}
 		if m.telemetryFlight != 0 {
 			return m, tea.Batch(btopCommand, fleetCommand, telemetryTick(time.Second, m.telemetryGen))
@@ -1111,6 +1124,11 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			logVerbose("failed to record action usage: %v", msg.Err)
 		}
 		return m, nil
+	case hostActivityMsg:
+		if msg.Err != nil {
+			logVerbose("failed to record host activity: %v", msg.Err)
+		}
+		return m, nil
 	case transferScanMsg:
 		if m.transfer == nil || m.transfer.Stage != msg.Stage {
 			return m, nil
@@ -1150,6 +1168,35 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.transfer != nil {
 		return m.updateTransfer(key)
+	}
+	// The confirm modal renders above the command result view (see View), so
+	// it must also take the keys first: re-running a confirm-required command
+	// from the result view opens it while the result is still on screen.
+	if m.confirmOpen {
+		switch key {
+		case "y", "Y":
+			if m.confirmAction.Action == actionCopyKey {
+				usageCmd := m.recordActionUsage(actionCopyKey, commandConfig{})
+				return m.startTerminalAction(m.confirmAction, usageCmd)
+			}
+			return m.startSavedCommand(m.confirmAction)
+		case "esc", "n", "N":
+			m.confirmOpen = false
+			m.confirmAction = dashboardSelection{}
+			m.confirmOffset = 0
+		case "k":
+			m.confirmOffset = max(0, m.confirmOffset-1)
+		case "j":
+			width := m.overlayWidth(76)
+			bodyRows := len(m.confirmReviewLines(m.overlayContentWidth(width)))
+			visibleRows := max(1, m.overlayContentHeight()-2)
+			if bodyRows > visibleRows {
+				visibleRows = max(1, visibleRows-1)
+			}
+			maxOffset := max(0, bodyRows-visibleRows)
+			m.confirmOffset = min(maxOffset, m.confirmOffset+1)
+		}
+		return m, nil
 	}
 	if m.commandResult != nil {
 		switch key {
@@ -1206,32 +1253,6 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.activityCursor = max(0, m.activityCursor-1)
 		case "j":
 			m.activityCursor = min(max(0, len(events)-1), m.activityCursor+1)
-		}
-		return m, nil
-	}
-	if m.confirmOpen {
-		switch key {
-		case "y":
-			if m.confirmAction.Action == actionCopyKey {
-				usageCmd := m.recordActionUsage(actionCopyKey, commandConfig{})
-				return m.startTerminalAction(m.confirmAction, usageCmd)
-			}
-			return m.startSavedCommand(m.confirmAction)
-		case "esc":
-			m.confirmOpen = false
-			m.confirmAction = dashboardSelection{}
-			m.confirmOffset = 0
-		case "k":
-			m.confirmOffset = max(0, m.confirmOffset-1)
-		case "j":
-			width := m.overlayWidth(76)
-			bodyRows := len(m.confirmReviewLines(m.overlayContentWidth(width)))
-			visibleRows := max(1, m.overlayContentHeight()-2)
-			if bodyRows > visibleRows {
-				visibleRows = max(1, visibleRows-1)
-			}
-			maxOffset := max(0, bodyRows-visibleRows)
-			m.confirmOffset = min(maxOffset, m.confirmOffset+1)
 		}
 		return m, nil
 	}
@@ -1540,22 +1561,22 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(1)
-			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), m.restartTelemetryTick(100*time.Millisecond))
 		}
 	case "shift+tab":
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(-1)
-			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), m.restartTelemetryTick(100*time.Millisecond))
 		}
 	case "left":
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(-1)
-			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), m.restartTelemetryTick(100*time.Millisecond))
 		}
 	case "right":
 		if m.workspaceTabsVisible() {
 			m.cycleWorkspace(1)
-			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), telemetryTick(100*time.Millisecond, m.telemetryGen))
+			return m, tea.Batch(m.ensureBtopStream(), m.ensureFleetTelemetry(), m.restartTelemetryTick(100*time.Millisecond))
 		}
 	case "h":
 		m.helpOpen = true
@@ -1584,14 +1605,14 @@ func (m dashboardModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(-1)
 		if before != m.selectedTarget() {
 			m.resetTelemetryTarget()
-			return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+			return m, m.restartTelemetryTick(100 * time.Millisecond)
 		}
 	case "j":
 		before := m.selectedTarget()
 		m.moveCursor(1)
 		if before != m.selectedTarget() {
 			m.resetTelemetryTarget()
-			return m, telemetryTick(100*time.Millisecond, m.telemetryGen)
+			return m, m.restartTelemetryTick(100 * time.Millisecond)
 		}
 	case "enter":
 		return m.choose(actionSSH)
@@ -1686,6 +1707,16 @@ func (m dashboardModel) fleetTelemetrySpecs(workspace string) []fleetTelemetrySp
 	return specs
 }
 
+// restartTelemetryTick starts a fresh telemetry clock chain and retires every
+// older one by bumping the generation, so event handlers that want an
+// immediate tick (focus, selection change, refresh) never leave a second
+// chain running alongside the first. Without this, chains accumulated over a
+// session and each one forced a full View() on its own schedule.
+func (m *dashboardModel) restartTelemetryTick(delay time.Duration) tea.Cmd {
+	m.telemetryGen++
+	return telemetryTick(delay, m.telemetryGen)
+}
+
 func (m *dashboardModel) waitForFleetTelemetry() tea.Cmd {
 	if m.fleetTelemetryPool == nil || m.fleetTelemetryWaiting {
 		return nil
@@ -1766,7 +1797,9 @@ func (m dashboardModel) btopGateReason() string {
 		return "Live btop needs the Console workspace tabs (terminal ≥150×28)"
 	}
 	if _, _, ok := m.monitorBtopViewport(); !ok {
-		minWidth := minBtopTerminalWidth(m.density)
+		// Tabs (checked above) already need 150 columns, so never quote a
+		// smaller width than the user must actually reach.
+		minWidth := max(150, minBtopTerminalWidth(m.density))
 		minHeight := minBtopTerminalHeight(m.activityOpen)
 		reason := fmt.Sprintf("Terminal too small for live btop: need ≥%d×%d, have %d×%d",
 			minWidth, minHeight, m.width, m.height)
@@ -2309,6 +2342,22 @@ func dashboardActionUsageKey(action dashboardAction, command commandConfig) stri
 	return string(action)
 }
 
+// hostActivityMsg reports the outcome of the asynchronous frecency update.
+type hostActivityMsg struct{ Err error }
+
+// recordHostSuccessCmd persists a successful host interaction off the UI
+// goroutine: updateState takes a file lock (up to 2 s) and fsyncs, which used
+// to run inline in Update and stall rendering.
+func (m dashboardModel) recordHostSuccessCmd(target string, usedAt time.Time) tea.Cmd {
+	statePath := m.statePath
+	if statePath == "" || target == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		return hostActivityMsg{Err: recordHostSuccess(statePath, target, usedAt)}
+	}
+}
+
 func (m *dashboardModel) recordActionUsage(action dashboardAction, command commandConfig) tea.Cmd {
 	key := dashboardActionUsageKey(action, command)
 	if key == "" {
@@ -2585,6 +2634,11 @@ func (m dashboardModel) View() string {
 	header := m.headerView(s)
 	footer := m.footerView(s)
 	bodyHeight, workspaceHeight, drawerHeight := m.dashboardHeights()
+	if m.btopFrameCache != nil {
+		m.btopFrameCache.deferSwap = true
+		m.btopFrameCache.pendingTwins = nil
+		m.btopFrameCache.pendingLines = nil
+	}
 	body := m.dashboardBodyView(s, m.width, workspaceHeight)
 	if drawerHeight > 0 {
 		body = lipgloss.JoinVertical(lipgloss.Left,
@@ -2593,9 +2647,14 @@ func (m dashboardModel) View() string {
 		)
 	}
 	body = fitTerminalView(body, m.width, bodyHeight)
-	return m.finishView(
-		lipgloss.JoinVertical(lipgloss.Left, header, body, footer),
-	)
+	view := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	if m.btopFrameCache != nil {
+		view = btopSwapTwins(view, m.btopFrameCache.pendingTwins, m.btopFrameCache.pendingLines)
+		m.btopFrameCache.deferSwap = false
+		m.btopFrameCache.pendingTwins = nil
+		m.btopFrameCache.pendingLines = nil
+	}
+	return m.finishView(view)
 }
 
 func (m dashboardModel) dashboardHeights() (body, workspace, drawer int) {
@@ -2889,16 +2948,37 @@ func (m dashboardModel) consoleWorkspaceView(s dashboardStyles, width, height in
 	actionWidth := m.monitorActionWidth(width)
 	monitorWidth := width - actionWidth
 	summaryHeight, btopHeight := monitorPaneHeights(height)
+	// Lay out with the pane's ASCII twin so the joins and fits below never
+	// measure the ANSI-dense btop frame; swap the real rows in at the end.
+	// The painted real pane rows only differ from the twin's by zero-width
+	// escape sequences, so every width decision made here is identical.
+	panel, twinPanel, _, _ := m.btopPanelViews(s, monitorWidth, btopHeight, false, true)
+	panelRows := strings.Split(panel, "\n")
+	twinRows := strings.Split(twinPanel, "\n")
+	rowTwins := make([]string, 0, len(twinRows))
+	rowLines := make([]string, 0, len(twinRows))
+	for index := range twinRows {
+		if index < len(panelRows) && twinRows[index] != panelRows[index] {
+			rowTwins = append(rowTwins, twinRows[index])
+			rowLines = append(rowLines, panelRows[index])
+		}
+	}
 	monitor := lipgloss.JoinVertical(lipgloss.Left,
 		fitTerminalView(m.monitorSummaryView(s, monitorWidth, summaryHeight), monitorWidth, summaryHeight),
-		fitTerminalView(m.btopPanelView(s, monitorWidth, btopHeight, false, true), monitorWidth, btopHeight),
+		fitTerminalView(twinPanel, monitorWidth, btopHeight),
 	)
-	return lipgloss.NewStyle().Width(width).Height(height).Render(
+	composed := lipgloss.NewStyle().Width(width).Height(height).Render(
 		lipgloss.JoinHorizontal(lipgloss.Top,
 			fitTerminalView(monitor, monitorWidth, height),
 			fitTerminalView(m.monitorActionRailView(s, actionWidth, height), actionWidth, height),
 		),
 	)
+	if m.btopFrameCache != nil && m.btopFrameCache.deferSwap {
+		m.btopFrameCache.pendingTwins = rowTwins
+		m.btopFrameCache.pendingLines = rowLines
+		return composed
+	}
+	return btopSwapTwins(composed, rowTwins, rowLines)
 }
 
 func monitorPaneHeights(height int) (summary, btop int) {
@@ -3472,6 +3552,18 @@ func (m dashboardModel) btopPaneView(s dashboardStyles, width, height int) strin
 func (m dashboardModel) btopPanelView(
 	s dashboardStyles, width, height int, leftBorder, topBorder bool,
 ) string {
+	panel, _, _, _ := m.btopPanelViews(s, width, height, leftBorder, topBorder)
+	return panel
+}
+
+// btopPanelViews renders the BTOP pane and also returns an ASCII twin of it
+// (same rows, same cell widths, frame rows tagged by marker) plus the swap
+// lists, so a caller can lay out the twin cheaply and restore the real rows
+// afterwards with btopSwapTwins. Rows other than the frame are identical in
+// both, so swapping is a no-op for them.
+func (m dashboardModel) btopPanelViews(
+	s dashboardStyles, width, height int, leftBorder, topBorder bool,
+) (panel, twinPanel string, twins, lines []string) {
 	host := m.selectedHost()
 	entry := m.telemetry[host.Target]
 	innerWidth, frameHeight := btopFrameViewport(width, height, leftBorder, topBorder)
@@ -3494,16 +3586,27 @@ func (m dashboardModel) btopPanelView(
 		context := truncateText(displayName(host), max(8, innerWidth-lipgloss.Width(header)-2))
 		header += s.muted.Render("  ·  " + context)
 	}
-	lines := []string{header, s.muted.Render(strings.Repeat("─", innerWidth))}
+	rows := []string{header, s.muted.Render(strings.Repeat("─", innerWidth))}
 
 	if host.Target == "" {
-		lines = append(lines, "", s.muted.Render("Select a host to start."))
+		rows = append(rows, "", s.muted.Render("Select a host to start."))
 	} else {
 		if m.btopStreamError != "" {
-			lines = append(lines, s.failure.Render(truncateText(m.btopStreamError, innerWidth)))
+			rows = append(rows, s.failure.Render(truncateText(m.btopStreamError, innerWidth)))
 		}
 		if entry.Current.BtopFrame != "" {
-			lines = append(lines, m.btopFrameLines(entry.Current.BtopFrame, innerWidth, frameHeight)...)
+			// A stale frame stays visible while the stream is gated (for
+			// example after shrinking the terminal); say why above it so the
+			// IDLE badge is explained instead of hidden behind the old frame.
+			if m.btopStreamState == "" {
+				if reason := m.btopGateReason(); reason != "" {
+					rows = append(rows, s.warning.Render(truncateText(reason, innerWidth)))
+					frameHeight = max(1, frameHeight-1)
+				}
+			}
+			frameLines, frameTwins := m.btopFrameLines(entry.Current.BtopFrame, innerWidth, frameHeight)
+			rows = append(rows, frameTwins...)
+			twins, lines = frameTwins, frameLines
 		} else {
 			message := "Opening a live remote terminal…"
 			switch m.btopStreamState {
@@ -3526,47 +3629,84 @@ func (m dashboardModel) btopPanelView(
 			case "live":
 				message = "Waiting for the first complete btop frame…"
 			}
-			lines = append(lines, "", s.muted.Render(truncateText(message, innerWidth)))
+			rows = append(rows, "", s.muted.Render(truncateText(message, innerWidth)))
 		}
 	}
 	footer := "[j/k] host  ·  [r] reconnect  ·  [enter] SSH"
-	if len(lines) < height-2 {
-		lines = append(lines, "", s.muted.Render(truncateText(footer, innerWidth)))
+	if len(rows) < height-2 {
+		rows = append(rows, "", s.muted.Render(truncateText(footer, innerWidth)))
 	}
-	panel := s.panel.BorderRight(false).BorderBottom(false)
+	panelStyle := s.panel.BorderRight(false).BorderBottom(false)
 	panelWidth, panelHeight := width, height
 	if !leftBorder {
-		panel = panel.BorderLeft(false)
+		panelStyle = panelStyle.BorderLeft(false)
 	} else {
 		panelWidth--
 	}
 	if !topBorder {
-		panel = panel.BorderTop(false)
+		panelStyle = panelStyle.BorderTop(false)
 	} else {
 		panelHeight--
 	}
-	return m.renderPanel(panel.Width(max(1, panelWidth)).Height(max(1, panelHeight)).Padding(0, 1),
-		strings.Join(lines, "\n"))
+	style := panelStyle.Width(max(1, panelWidth)).Height(max(1, panelHeight)).Padding(0, 1)
+	// lipgloss lays out the twins (plain ASCII, cheap to measure); the real
+	// frame rows are swapped in before the surface paint so the bytes match
+	// rendering the real content directly.
+	twinPanel = style.Render(strings.Join(rows, "\n"))
+	panel = btopSwapTwins(twinPanel, twins, lines)
+	if !m.plain && m.theme.Surface != "" {
+		cache := m.paintCache()
+		panel = paintTerminalSurface(panel, cache.textForegroundPrefix, cache.surfaceBackgroundPrefix)
+	}
+	return panel, twinPanel, twins, lines
 }
 
 // btopFrameLines returns fitTerminalView(frame, width, height) split into
 // lines, served from m.btopFrameCache when the frame (identified by
 // btopStreamFrames, see dashboardBtopFrameCache) and viewport size match the
 // last computation.
-func (m dashboardModel) btopFrameLines(frame string, width, height int) []string {
+func (m dashboardModel) btopFrameLines(frame string, width, height int) (lines, twins []string) {
 	if m.btopFrameCache != nil && m.btopFrameCache.valid &&
 		m.btopFrameCache.frames == m.btopStreamFrames &&
 		m.btopFrameCache.width == width && m.btopFrameCache.height == height {
-		return m.btopFrameCache.lines
+		return m.btopFrameCache.lines, m.btopFrameCache.twins
 	}
 	fitted := fitTerminalView(frame, width, height)
-	lines := strings.Split(fitted, "\n")
+	lines = strings.Split(fitted, "\n")
+	twins = make([]string, len(lines))
+	for index, line := range lines {
+		twins[index] = btopTwinLine(index, terminalWidth(line))
+	}
 	if m.btopFrameCache != nil {
 		*m.btopFrameCache = dashboardBtopFrameCache{
-			valid: true, frames: m.btopStreamFrames, width: width, height: height, lines: lines,
+			valid: true, frames: m.btopStreamFrames, width: width, height: height,
+			lines: lines, twins: twins,
 		}
 	}
-	return lines
+	return lines, twins
+}
+
+// btopTwinMarker is an unknown CSI sequence (zero width for ansi.StringWidth
+// and copied through untouched by lipgloss) that tags a twin line so the real
+// line can be swapped back in after layout.
+const btopTwinMarker = "\x1b[9975;"
+
+func btopTwinLine(index, width int) string {
+	return btopTwinMarker + strconv.Itoa(index) + "~" + strings.Repeat("~", width)
+}
+
+// btopSwapTwins replaces every twin line in view with its real line.
+func btopSwapTwins(view string, twins, lines []string) string {
+	if len(twins) == 0 || !strings.Contains(view, btopTwinMarker) {
+		return view
+	}
+	pairs := make([]string, 0, 2*len(twins))
+	for index := range twins {
+		if index < len(lines) && twins[index] != lines[index] {
+			pairs = append(pairs, twins[index], lines[index])
+		}
+	}
+	return strings.NewReplacer(pairs...).Replace(view)
 }
 
 func btopFrameViewport(width, height int, leftBorder, topBorder bool) (columns, rows int) {
@@ -5176,7 +5316,104 @@ func terminalWidth(value string) int {
 	if width, ok := asciiPrintableWidth(value); ok {
 		return width
 	}
+	if width, ok := simpleTerminalWidth(value); ok {
+		return width
+	}
 	return ansi.StringWidth(value)
+}
+
+// simpleTerminalWidth measures strings made only of CSI/OSC escape sequences
+// and runes that ansi.StringWidth is known to count as exactly one cell with
+// no grapheme clustering (see simpleRuneWidthOne and
+// TestSimpleTerminalWidthMatchesAnsi, which checks every rune in the ranges).
+// That covers the live btop frame -- braille graphs, box drawing, blocks,
+// arrows, ASCII -- whose grapheme-cluster measurement dominated the CPU
+// profile. Anything else (CJK, emoji, combining marks, control characters)
+// reports ok=false so the caller falls back to the full implementation.
+func simpleTerminalWidth(value string) (int, bool) {
+	width := 0
+	for i := 0; i < len(value); {
+		c := value[i]
+		switch {
+		case c == 0x1b:
+			end, ok := simpleEscapeEnd(value, i)
+			if !ok {
+				return 0, false
+			}
+			i = end + 1
+			continue
+		case c < 0x20 || c == 0x7f:
+			return 0, false
+		case c < 0x80:
+			width++
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(value[i:])
+		if r == utf8.RuneError || !simpleRuneWidthOne(r) {
+			return 0, false
+		}
+		width++
+		i += size
+	}
+	return width, true
+}
+
+// simpleEscapeEnd returns the index of the final byte of a well-formed CSI
+// (ESC [ params final) or OSC (ESC ] ... BEL | ESC \) sequence at start.
+func simpleEscapeEnd(value string, start int) (int, bool) {
+	if start+1 >= len(value) {
+		return 0, false
+	}
+	switch value[start+1] {
+	case '[':
+		end := start + 2
+		for end < len(value) && value[end] >= 0x20 && value[end] <= 0x3f {
+			end++
+		}
+		if end < len(value) && value[end] >= 0x40 && value[end] <= 0x7e {
+			return end, true
+		}
+		return 0, false
+	case ']':
+		for end := start + 2; end < len(value); end++ {
+			if value[end] == 0x07 {
+				return end, true
+			}
+			if value[end] == 0x1b && end+1 < len(value) && value[end+1] == '\\' {
+				return end + 1, true
+			}
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// simpleRuneWidthOne reports runes that ansi.StringWidth measures as one
+// cell and never merges into a wider grapheme cluster. Keep in sync with
+// TestSimpleTerminalWidthMatchesAnsi, which verifies every listed rune.
+func simpleRuneWidthOne(r rune) bool {
+	switch {
+	case r == 0x00ad: // soft hyphen is zero width
+		return false
+	case r >= 0x00a0 && r <= 0x017f: // Latin-1 supplement, Latin extended-A
+		return true
+	case r >= 0x2010 && r <= 0x2027: // dashes, quotes, bullets, ellipsis
+		return true
+	case r >= 0x2070 && r <= 0x209f: // superscripts and subscripts
+		return true
+	case r >= 0x2190 && r <= 0x22ff: // arrows, mathematical operators
+		return true
+	case r >= 0x2500 && r <= 0x259f: // box drawing, block elements
+		return true
+	case r >= 0x25a0 && r <= 0x25fc: // geometric shapes (25FD/25FE are wide)
+		return true
+	case r == 0x25ff:
+		return true
+	case r >= 0x2800 && r <= 0x28ff: // braille patterns
+		return true
+	}
+	return false
 }
 
 func asciiPrintableWidth(value string) (int, bool) {

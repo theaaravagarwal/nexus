@@ -19,6 +19,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 ### Changed
 
 - Opening help, palette, or settings no longer tears down the btop session (30 s grace period); resize operations reconnect while keeping the last frame.
+- Dashboard idle CPU: the Console clock tick runs every 5 s instead of 1 s while nothing is connecting, telemetry tick chains no longer accumulate across focus/selection events, the btop stream renders its virtual terminal only when a frame is due, and the Console lays out the ANSI-dense btop pane through width-identical ASCII stand-ins so lipgloss never re-measures it. Console with a live btop dropped from about 8.7% to under 4% of a core; render output is byte-identical (golden and differential tests).
+- The frecency update after a successful host action runs in a background command instead of blocking the UI on a file lock and fsync.
+- Confirm modal accepts `Y`, `n`, and `N`, and takes keyboard focus when opened from the command result view (re-running a confirm-required command there was previously stuck).
+- When the live btop pane is gated (for example after shrinking the terminal) the reason is shown above the stale frame.
+- `NEXUS_CPUPROFILE=path` writes a CPU profile of a run; `NEXUS_TRACE_MESSAGES=1` with `--verbose` logs every message type reaching the dashboard.
 
 ### Added
 

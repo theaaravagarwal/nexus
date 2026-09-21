@@ -132,6 +132,11 @@ const (
 	btopUnavailableMarker = "NEXUS_BTOP_UNAVAILABLE"
 )
 
+// telemetryIdleTick paces the console/fleet clock tick while nothing is
+// connecting: it only refreshes "sampled 5s ago" style ages, and every tick
+// forces a full View(), so keeping it slow is the main idle-CPU lever.
+const telemetryIdleTick = 5 * time.Second
+
 func telemetryTick(delay time.Duration, generation uint64) tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		return telemetryTickMsg{Generation: generation}
