@@ -258,6 +258,10 @@ Monitor shows one compressed live btop terminal for the selected host; press
 `r` to reconnect or `enter` to open SSH. **Monitor btop** under Settings can
 disable it, while `nexus top <host>` opens the full interactive monitor.
 
+### Live btop requirements
+
+Live btop in the Monitor pane requires `experimental_tabs` and `monitor_btop` enabled in the `ui` section, a terminal of at least 150×32 (150×44 with the activity drawer open), key-based SSH authentication (batch mode), and btop installed on the remote host. If the remote btop configuration needs more rows than the pane, nexus automatically runs btop with fewer boxes (cpu, memory, network, and process subsets) via a temporary config without modifying the user's btop settings.
+
 Older configs using `ui.experimental_fleet_btop` remain supported. Saving the
 setting migrates that key to `ui.monitor_btop`.
 
