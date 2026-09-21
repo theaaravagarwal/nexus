@@ -27,10 +27,18 @@ jobs:
         run: go mod tidy && git diff --exit-code
 
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Vet
         run: go vet ./...
 
       - name: Build
         run: go build ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      - name: Vulnerability scan
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...

@@ -329,15 +329,10 @@ The release prioritizes remote workflows, multiplexing, color consistency, and g
 
 ## Development
 
-```bash
-go test ./...
-go vet ./...
-```
-
-Optional local lint:
+Run checks with:
 
 ```bash
-golangci-lint run ./...
+make check
 ```
 
 ## Release
@@ -347,7 +342,6 @@ golangci-lint run ./...
 
 ## Contributing
 
-Run `go test ./...`, `go vet ./...`, and `golangci-lint run ./...` before
-opening a focused pull request. Include tests for behavior changes.
+Run `make check` before opening a focused pull request. Include tests for behavior changes.
 
 Report vulnerabilities using the process in `SECURITY.md`.

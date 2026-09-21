@@ -51,3 +51,6 @@ vendor/
 .DS_Store
 Thumbs.db
 main.bak
+
+# Claude Code agent worktrees
+.claude/worktrees/

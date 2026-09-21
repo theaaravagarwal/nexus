@@ -6,7 +6,7 @@ Thanks for contributing to `nexus`.
 
 Prerequisites:
 
-- Go 1.22+
+- Go 1.26.3+
 - `ssh`
 - `rsync`
 - `fzf`
@@ -14,23 +14,15 @@ Prerequisites:
 Install deps and run checks:
 
 ```bash
-go test ./...
-go vet ./...
-```
-
-Optional local linting:
-
-```bash
-golangci-lint run ./...
+make check
 ```
 
 ## Branch and PR Workflow
 
 1. Create a branch from `main`.
 2. Keep changes focused and include tests for behavior changes.
-3. Open a PR using the template.
-4. Wait for CI, lint, and vulnerability checks to pass.
-5. Squash-merge unless maintainers request otherwise.
+3. Open a PR and wait for CI, lint, and vulnerability checks to pass.
+4. Squash-merge unless maintainers request otherwise.
 
 ## Code Guidelines
 
