@@ -26,13 +26,13 @@ const btopFakeHandlesVer = "# NEXUS_FAKE_HANDLES_VER"
 func setupBtopFakeSSH(t *testing.T, script string) string {
 	t.Helper()
 	dir := t.TempDir()
-	btopPlatformCache.Range(func(key, _ any) bool {
-		btopPlatformCache.Delete(key)
+	remotePlatformCache.Range(func(key, _ any) bool {
+		remotePlatformCache.Delete(key)
 		return true
 	})
 	t.Cleanup(func() {
-		btopPlatformCache.Range(func(key, _ any) bool {
-			btopPlatformCache.Delete(key)
+		remotePlatformCache.Range(func(key, _ any) bool {
+			remotePlatformCache.Delete(key)
 			return true
 		})
 	})
@@ -458,7 +458,7 @@ printf 'NEXUS_BTOP_FRAME_BEGIN\r\n'
 		}
 	}
 verify:
-	if platform, ok := btopPlatformCache.Load("robot@windows.example"); !ok || platform != btopPlatformWindows {
+	if platform, ok := remotePlatformCache.Load("robot@windows.example"); !ok || platform != remotePlatformWindows {
 		t.Fatalf("platform not cached as windows: %v %v", platform, ok)
 	}
 	raw, err := os.ReadFile(argsPath)

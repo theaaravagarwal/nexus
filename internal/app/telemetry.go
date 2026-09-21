@@ -155,7 +155,11 @@ func telemetryCommand(target string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), telemetryTimeout)
 		defer cancel()
-		args, err := buildMonitoringSSHArgs(target, false, remoteShellCommand("sh", telemetryScript))
+		remote := remoteShellCommand("sh", telemetryScript)
+		if detectRemotePlatform(ctx, target) == remotePlatformWindows {
+			remote = windowsTelemetryCommand()
+		}
+		args, err := buildMonitoringSSHArgs(target, false, remote)
 		if err != nil {
 			return telemetryResultMsg{Generation: generation, Target: target, Err: err}
 		}

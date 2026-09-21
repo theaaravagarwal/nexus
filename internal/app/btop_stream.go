@@ -246,11 +246,11 @@ func streamRemoteBtopFrom(
 ) string {
 	defer close(events)
 	columns, rows = clampBtopViewport(columns, rows)
-	platform := detectBtopPlatform(ctx, target)
+	platform := detectRemotePlatform(ctx, target)
 	if ctx.Err() != nil {
 		return startBoxes
 	}
-	if platform == btopPlatformWindows {
+	if platform == remotePlatformWindows {
 		// btop4win reads its own btop.conf next to the executable, so there
 		// is no layout ladder: report the size it asked for instead.
 		var frameCount uint64
@@ -383,7 +383,7 @@ func runBtopStreamAttempt(
 	logVerbose("btop stream %s: session start viewport=%dx%d boxes=%q platform=%s", target, columns, rows, boxes, platform)
 	var args []string
 	var err error
-	if platform == btopPlatformWindows {
+	if platform == remotePlatformWindows {
 		args, err = buildMonitoringSSHArgs(target, false, windowsBtopStreamCommand(columns, rows, windowsBtopSignal()))
 	} else {
 		script := remoteShellCommand("sh", btopStreamCommand(columns, rows, boxes))
@@ -748,40 +748,40 @@ func skipEscapeSequence(frame string, start int) int {
 
 // Remote platforms the Monitor stream knows how to drive.
 const (
-	btopPlatformUnix    = "unix"
-	btopPlatformWindows = "windows"
+	remotePlatformUnix    = "unix"
+	remotePlatformWindows = "windows"
 )
 
-// btopPlatformCache remembers, per target, whether the remote shell is
+// remotePlatformCache remembers, per target, whether the remote shell is
 // Windows cmd.exe or a POSIX sh; probing costs one short ssh round trip and
 // the answer never changes within a process.
-var btopPlatformCache sync.Map
+var remotePlatformCache sync.Map
 
-// btopPlatformProbe is echoed by the remote shell: cmd.exe expands %OS% to
+// remotePlatformProbe is echoed by the remote shell: cmd.exe expands %OS% to
 // "Windows_NT", a POSIX shell prints it literally. (`ver` would be the
 // obvious probe, but at least one Windows sshd resets the connection on it.)
-const btopPlatformProbe = "echo %OS%"
+const remotePlatformProbe = "echo %OS%"
 
-// detectBtopPlatform runs the probe over a non-PTY session. Transport
+// detectRemotePlatform runs the probe over a non-PTY session. Transport
 // failures are not cached so the real attempt can explain them.
-func detectBtopPlatform(ctx context.Context, target string) string {
-	if cached, ok := btopPlatformCache.Load(target); ok {
+func detectRemotePlatform(ctx context.Context, target string) string {
+	if cached, ok := remotePlatformCache.Load(target); ok {
 		return cached.(string)
 	}
-	args, err := buildMonitoringSSHArgs(target, false, btopPlatformProbe)
+	args, err := buildMonitoringSSHArgs(target, false, remotePlatformProbe)
 	if err != nil {
-		return btopPlatformUnix
+		return remotePlatformUnix
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	output, runErr := exec.CommandContext(probeCtx, "ssh", args...).Output()
-	platform := btopPlatformUnix
+	platform := remotePlatformUnix
 	if strings.Contains(string(output), "Windows_NT") {
-		platform = btopPlatformWindows
+		platform = remotePlatformWindows
 	}
 	var exitErr *exec.ExitError
 	if runErr == nil || errors.As(runErr, &exitErr) {
-		btopPlatformCache.Store(target, platform)
+		remotePlatformCache.Store(target, platform)
 	}
 	logVerbose("btop stream %s: platform=%s (probe err=%v)", target, platform, runErr)
 	return platform

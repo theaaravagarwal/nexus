@@ -298,7 +298,11 @@ func streamRemoteFleetTelemetry(
 	ctx context.Context, target string, generation uint64, interval time.Duration,
 	publish func(fleetTelemetryEvent),
 ) error {
-	args, err := buildMonitoringSSHArgs(target, false, remoteShellCommand("sh", fleetTelemetryCommand(interval)))
+	remote := remoteShellCommand("sh", fleetTelemetryCommand(interval))
+	if detectRemotePlatform(ctx, target) == remotePlatformWindows {
+		remote = windowsFleetTelemetryCommand(interval)
+	}
+	args, err := buildMonitoringSSHArgs(target, false, remote)
 	if err != nil {
 		return err
 	}
