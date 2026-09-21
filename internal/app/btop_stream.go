@@ -153,17 +153,22 @@ func clampBtopViewport(columns, rows int) (int, int) {
 // remoteShellCommand so it runs safely under the login shell.
 func btopStreamCommand(columns, rows int, boxes string) string {
 	columns, rows = clampBtopViewport(columns, rows)
-	if boxes == "" {
-		return fmt.Sprintf(`
-if ! command -v btop >/dev/null 2>&1; then
-  printf '%s\n'
-  exit 0
+	launch := "btop"
+	setup := ""
+	if boxes != "" {
+		setup = fmt.Sprintf(`conf="${XDG_CONFIG_HOME:-$HOME/.config}/btop"
+tmp=$(mktemp -d 2>/dev/null) || tmp="/tmp/nexus-btop-$$"
+mkdir -p "$tmp/btop"
+trap 'rm -rf "$tmp"' EXIT
+if [ -f "$conf/btop.conf" ]; then
+  grep -v -E '^[[:space:]]*(shown_boxes|update_ms)[[:space:]]*=' "$conf/btop.conf" > "$tmp/btop/btop.conf"
 fi
-printf '%s\n'
-export TERM=xterm-256color
-stty cols %d rows %d 2>/dev/null || true
-exec btop
-`, btopUnavailableMarker, btopFrameMarker, columns, rows)
+if [ -d "$conf/themes" ]; then
+  ln -s "$conf/themes" "$tmp/btop/themes" 2>/dev/null
+fi
+printf 'shown_boxes = "%s"\nupdate_ms = 1000\n' >> "$tmp/btop/btop.conf"
+`, boxes)
+		launch = `XDG_CONFIG_HOME="$tmp" btop`
 	}
 	return fmt.Sprintf(`
 if ! command -v btop >/dev/null 2>&1; then
@@ -173,19 +178,20 @@ fi
 printf '%s\n'
 export TERM=xterm-256color
 stty cols %d rows %d 2>/dev/null || true
-conf="${XDG_CONFIG_HOME:-$HOME/.config}/btop"
-tmp=$(mktemp -d 2>/dev/null) || tmp="/tmp/nexus-btop-$$"
-mkdir -p "$tmp/btop"
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-if [ -f "$conf/btop.conf" ]; then
-  grep -v -E '^[[:space:]]*(shown_boxes|update_ms)[[:space:]]*=' "$conf/btop.conf" > "$tmp/btop/btop.conf"
-fi
-if [ -d "$conf/themes" ]; then
-  ln -s "$conf/themes" "$tmp/btop/themes" 2>/dev/null
-fi
-printf 'shown_boxes = "%s"\nupdate_ms = 1000\n' >> "$tmp/btop/btop.conf"
-XDG_CONFIG_HOME="$tmp" btop
-`, btopUnavailableMarker, btopFrameMarker, columns, rows, boxes)
+# Background jobs of a non-interactive shell get stdin from /dev/null, so
+# hand btop (and the watcher below) the controlling terminal explicitly.
+%s%s </dev/tty &
+pid=$!
+stop() { kill -TERM "$pid" "$watcher" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null; }
+watcher=
+trap 'stop; exit 0' HUP INT TERM
+# When nexus stops the stream the session's pty disappears; btop ignores the
+# SIGHUP that follows, so watch the tty and stop btop ourselves.
+( while stty size </dev/tty >/dev/null 2>&1; do sleep 2; done; kill -TERM "$pid" 2>/dev/null ) &
+watcher=$!
+wait "$pid"
+kill "$watcher" 2>/dev/null
+`, btopUnavailableMarker, btopFrameMarker, columns, rows, setup, launch)
 }
 
 func waitForBtopStream(events <-chan btopStreamEventMsg) tea.Cmd {
