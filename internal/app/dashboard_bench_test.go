@@ -22,9 +22,9 @@ func BenchmarkDashboardViewWorkbench(b *testing.B) {
 	// Populate some hosts with metadata and telemetry
 	for i := 0; i < len(model.hosts) && i < 10; i++ {
 		model.hosts[i].Reachability = reachabilityResult{
-			Target: model.hosts[i].Target,
-			Status: reachOnline,
-			Latency: time.Duration((i + 1) * 5) * time.Millisecond,
+			Target:  model.hosts[i].Target,
+			Status:  reachOnline,
+			Latency: time.Duration((i+1)*5) * time.Millisecond,
 		}
 		model.telemetry[model.hosts[i].Target] = hostTelemetry{
 			Current: telemetrySample{
@@ -82,16 +82,16 @@ func BenchmarkDashboardViewConsole(b *testing.B) {
 	// Populate telemetry with btop frame for first host
 	if len(model.hosts) > 0 {
 		model.hosts[0].Reachability = reachabilityResult{
-			Target: model.hosts[0].Target,
-			Status: reachOnline,
+			Target:  model.hosts[0].Target,
+			Status:  reachOnline,
 			Latency: 5 * time.Millisecond,
 		}
 		model.telemetry[model.hosts[0].Target] = hostTelemetry{
 			Current: telemetrySample{
-				Target:         model.hosts[0].Target,
-				CollectedAt:    time.Now(),
-				BtopInstalled:  true,
-				BtopFrame:      btopFrame,
+				Target:        model.hosts[0].Target,
+				CollectedAt:   time.Now(),
+				BtopInstalled: true,
+				BtopFrame:     btopFrame,
 			},
 		}
 		model.telemetryTarget = model.hosts[0].Target
